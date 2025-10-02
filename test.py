@@ -7,6 +7,18 @@ from pathlib import Path
 import shutil
 from tqdm import tqdm
 from persiantools.jdatetime import JalaliDate
+import logging
+
+# Set up logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('crm_processing.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Function to split element name
 def split_element_name(element):
@@ -21,16 +33,21 @@ def split_element_name(element):
 
 # Function to extract date from file_name
 def extract_date(file_name):
-    """Extract date from file_name like '1404-01-01'."""
+    """Extract date from file_name like '1404-01-01' or '1404-01-1'."""
     try:
-        match = re.match(r'(\d{4}-\d{2}-\d{2})', file_name)
+        match = re.match(r'(\d{4}-\d{2}-\d{1,2})', file_name)
         if match:
             date_str = match.group(1)
+            # Normalize to YYYY-MM-DD
             year, month, day = map(int, date_str.split('-'))
+            date_str = f"{year:04d}-{month:02d}-{day:02d}"
+            year, month, day = map(int, date_str.split('-'))
+            logger.debug(f"Extracted and normalized date from {file_name}: {date_str}")
             return JalaliDate(year, month, day).strftime("%Y/%m/%d")
+        logger.warning(f"No valid date found in filename: {file_name}")
         return None
     except Exception as e:
-        print(f"Error extracting date from {file_name}: {str(e)}")
+        logger.error(f"Error extracting date from {file_name}: {str(e)}")
         return None
 
 # Function to check if a value is numeric
@@ -47,50 +64,64 @@ def is_numeric(value):
 # Function to load Excel/CSV files
 def load_excel(file_path):
     """Load and parse Excel/CSV file and return DataFrame."""
+    file_path = Path(file_path)  # Ensure file_path is a Path object
+    logger.info(f"Processing file: {file_path}")
     try:
         is_new_format = False
-        file_path = str(file_path)  # Ensure file_path is string
-        if file_path.lower().endswith('.csv'):
+        if file_path.suffix.lower() == '.csv':
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     preview_lines = [f.readline().strip() for _ in range(10)]
+                logger.debug(f"CSV preview (first 10 lines) for {file_path.name}:\n{preview_lines}")
                 is_new_format = any("Sample ID:" in line for line in preview_lines) or \
                                 any("Net Intensity" in line for line in preview_lines)
-            except Exception:
+                logger.info(f"File {file_path.name} detected as {'new' if is_new_format else 'old'} format")
+            except Exception as e:
+                logger.warning(f"Could not read CSV preview for {file_path.name}: {str(e)}. Assuming new format.")
                 is_new_format = True
         else:
             try:
-                engine = 'openpyxl' if file_path.lower().endswith('.xlsx') else 'xlrd'
+                engine = 'openpyxl' if file_path.suffix.lower() == '.xlsx' else 'xlrd'
                 preview = pd.read_excel(file_path, header=None, nrows=10, engine=engine)
+                logger.debug(f"Excel preview (first 10 rows) for {file_path.name}:\n{preview.to_string()}")
                 is_new_format = any(preview[0].str.contains("Sample ID:", na=False)) or \
                                 any(preview[0].str.contains("Net Intensity", na=False))
+                logger.info(f"File {file_path.name} detected as {'new' if is_new_format else 'old'} format")
             except Exception as e:
+                logger.error(f"Error reading Excel preview for {file_path.name}: {str(e)}")
                 raise
         
         data_rows = []
         current_sample = None
 
         if is_new_format:
-            if file_path.lower().endswith('.csv'):
+            if file_path.suffix.lower() == '.csv':
                 try:
                     with open(file_path, 'r', encoding='utf-8') as f:
                         reader = list(csv.reader(f, delimiter=',', quotechar='"'))
                         total_rows = len(reader)
+                        logger.debug(f"Total rows in CSV {file_path.name}: {total_rows}")
                         for idx, row in enumerate(reader):
+                            logger.debug(f"Processing row {idx}: {row}")
                             if idx == total_rows - 1:
+                                logger.debug(f"Skipping last row {idx} in {file_path.name}")
                                 continue
                             if not row or all(cell.strip() == "" for cell in row):
+                                logger.debug(f"Skipping empty row {idx} in {file_path.name}")
                                 continue
                             
                             if len(row) > 0 and row[0].startswith("Sample ID:"):
-                                current_sample = row[1].strip()
+                                current_sample = row[1].strip() if len(row) > 1 else "Unknown_Sample"
+                                logger.debug(f"Set current_sample to {current_sample} at row {idx}")
                                 continue
                             
                             if len(row) > 0 and (row[0].startswith("Method File:") or row[0].startswith("Calibration File:")):
+                                logger.debug(f"Skipping metadata row {idx}: {row[0]}")
                                 continue
                             
                             if current_sample is None:
                                 current_sample = "Unknown_Sample"
+                                logger.warning(f"No Sample ID found before row {idx}, using default: {current_sample}")
                             
                             element = split_element_name(row[0].strip())
                             try:
@@ -105,31 +136,39 @@ def load_excel(file_path):
                                         "Corr Con": concentration,
                                         "Type": type_value
                                     })
+                                    # logger.debug(f"Added row: Solution Label={current_sample}, Element={element}, Int={intensity}, Corr Con={concentration}, Type={type_value}")
                                 else:
-                                    print(f"Skipping row in {file_path.name}: Non-numeric values - Int={row[1] if len(row) > 1 else 'N/A'}, Corr Con={row[5] if len(row) > 5 else 'N/A'}")
+                                    logger.warning(f"Skipping row {idx} in {file_path.name}: Non-numeric values - Int={row[1] if len(row) > 1 else 'N/A'}, Corr Con={row[5] if len(row) > 5 else 'N/A'}")
                             except Exception as e:
-                                print(f"Error processing row in {file_path.name}: {str(e)}")
+                                logger.error(f"Error processing row {idx} in {file_path.name}: {str(e)}")
                                 continue
                 except Exception as e:
+                    logger.error(f"Failed to process CSV {file_path.name}: {str(e)}")
                     raise
             else:
                 try:
-                    engine = 'openpyxl' if file_path.lower().endswith('.xlsx') else 'xlrd'
+                    engine = 'openpyxl' if file_path.suffix.lower() == '.xlsx' else 'xlrd'
                     raw_data = pd.read_excel(file_path, header=None, engine=engine)
                     total_rows = raw_data.shape[0]
+                    logger.debug(f"Total rows in Excel {file_path.name}: {total_rows}")
                     for index, row in raw_data.iterrows():
+                        # logger.debug(f"Processing row {index}: {row.tolist()}")
                         if index == total_rows - 1:
+                            logger.debug(f"Skipping last row {index} in {file_path.name}")
                             continue
                         row_list = row.tolist()
                         
                         if any("No valid data found in the file" in str(cell) for cell in row_list):
+                            logger.debug(f"Skipping row {index} with 'No valid data' in {file_path.name}")
                             continue
                         
                         if isinstance(row[0], str) and row[0].startswith("Sample ID:"):
                             current_sample = row[0].split("Sample ID:")[1].strip()
+                            logger.debug(f"Set current_sample to {current_sample} at row {index}")
                             continue
                         
                         if isinstance(row[0], str) and (row[0].startswith("Method File:") or row[0].startswith("Calibration File:")):
+                            logger.debug(f"Skipping metadata row {index}: {row[0]}")
                             continue
                         
                         if current_sample and pd.notna(row[0]):
@@ -146,64 +185,81 @@ def load_excel(file_path):
                                         "Corr Con": concentration,
                                         "Type": type_value
                                     })
+                                    logger.debug(f"Added row: Solution Label={current_sample}, Element={element}, Int={intensity}, Corr Con={concentration}, Type={type_value}")
                                 else:
-                                    print(f"Skipping row in {file_path.name}: Non-numeric values - Int={row[1] if pd.notna(row[1]) else 'N/A'}, Corr Con={row[5] if pd.notna(row[5]) else 'N/A'}")
+                                    logger.warning(f"Skipping row {index} in {file_path.name}: Non-numeric values - Int={row[1] if pd.notna(row[1]) else 'N/A'}, Corr Con={row[5] if pd.notna(row[5]) else 'N/A'}")
                             except Exception as e:
-                                print(f"Error processing row in {file_path.name}: {str(e)}")
+                                logger.error(f"Error processing row {index} in {file_path.name}: {str(e)}")
                                 continue
                 except Exception as e:
+                    logger.error(f"Failed to process Excel {file_path.name}: {str(e)}")
                     raise
         else:
-            if file_path.lower().endswith('.csv'):
+            if file_path.suffix.lower() == '.csv':
                 try:
                     temp_df = pd.read_csv(file_path, header=None, nrows=1, on_bad_lines='skip')
+                    logger.debug(f"CSV header preview for {file_path.name}: {temp_df.to_string()}")
                     if temp_df.iloc[0].notna().sum() == 1:
                         df = pd.read_csv(file_path, header=1, on_bad_lines='skip')
                     else:
                         df = pd.read_csv(file_path, header=0, on_bad_lines='skip')
+                    logger.debug(f"Loaded CSV {file_path.name} with {len(df)} rows")
                 except Exception as e:
+                    logger.error(f"Could not parse CSV {file_path.name} as tabular format: {str(e)}")
                     raise ValueError(f"Could not parse CSV as tabular format: {str(e)}")
             else:
                 try:
-                    engine = 'openpyxl' if file_path.lower().endswith('.xlsx') else 'xlrd'
+                    engine = 'openpyxl' if file_path.suffix.lower() == '.xlsx' else 'xlrd'
                     temp_df = pd.read_excel(file_path, header=None, nrows=1, engine=engine)
+                    logger.debug(f"Excel header preview for {file_path.name}: {temp_df.to_string()}")
                     if temp_df.iloc[0].notna().sum() == 1:
                         df = pd.read_excel(file_path, header=1, engine=engine)
                     else:
                         df = pd.read_excel(file_path, header=0, engine=engine)
+                    logger.debug(f"Loaded Excel {file_path.name} with {len(df)} rows")
                 except Exception as e:
+                    logger.error(f"Could not parse Excel {file_path.name} as tabular format: {str(e)}")
                     raise ValueError(f"Could not parse Excel as tabular format: {str(e)}")
             
             df = df.iloc[:-1]
+            logger.debug(f"Removed last row, remaining rows: {len(df)}")
             
             expected_columns = ["Solution Label", "Element", "Int", "Corr Con"]
             column_mapping = {"Sample ID": "Solution Label"}
             df.rename(columns=column_mapping, inplace=True)
             
             if not all(col in df.columns for col in expected_columns):
-                raise ValueError(f"Required columns missing: {', '.join(set(expected_columns) - set(df.columns))}")
+                missing_cols = set(expected_columns) - set(df.columns)
+                logger.error(f"Required columns missing in {file_path.name}: {', '.join(missing_cols)}")
+                raise ValueError(f"Required columns missing: {', '.join(missing_cols)}")
             
             df['Element'] = df['Element'].apply(split_element_name)
+            logger.debug(f"Applied split_element_name to Element column in {file_path.name}")
             
             if 'Type' not in df.columns:
                 df['Type'] = df['Solution Label'].apply(lambda x: "Blk" if "BLANK" in str(x).upper() else "Sample")
+                logger.debug(f"Added Type column to {file_path.name}")
             
             # Filter out rows with non-numeric Corr Con
             df = df[df['Corr Con'].apply(is_numeric)].copy()
             df['Corr Con'] = df['Corr Con'].astype(float)
+            logger.debug(f"Filtered non-numeric Corr Con, remaining rows: {len(df)}")
         
         if not data_rows and is_new_format:
+            logger.error(f"No valid data found in {file_path.name}")
             raise ValueError("No valid data found in the file")
         elif is_new_format:
             df = pd.DataFrame(data_rows, columns=["Solution Label", "Element", "Int", "Corr Con", "Type"])
             df['Element'] = df['Element'].apply(split_element_name)
             df = df[df['Corr Con'].apply(is_numeric)].copy()
             df['Corr Con'] = df['Corr Con'].astype(float)
+            logger.debug(f"Created DataFrame for new format with {len(df)} rows")
         
+        logger.info(f"Successfully processed {file_path.name} with {len(df)} rows")
         return df
         
     except Exception as e:
-        print(f"Error loading {file_path}: {str(e)}")
+        logger.error(f"Error loading {file_path}: {str(e)}")
         return None
 
 # Function to initialize SQLite database
@@ -224,9 +280,10 @@ def init_db(db_path):
             )
         ''')
         conn.commit()
+        logger.info(f"Initialized database at {db_path}")
         return conn
     except Exception as e:
-        print(f"Error initializing database: {str(e)}")
+        logger.error(f"Error initializing database: {str(e)}")
         raise
 
 # Function to validate CRM ID
@@ -235,7 +292,7 @@ def is_valid_crm_id(crm_id):
     pattern = r'^(?:\s*CRM\s*)?(\d{3}(?:\s*[a-zA-Z])?)$'
     match = re.match(pattern, str(crm_id).strip(), re.IGNORECASE)
     is_valid = bool(match)
-    # print(f"Checking CRM ID: {crm_id}, Valid: {is_valid}")
+    logger.debug(f"Checking CRM ID: {crm_id}, Valid: {is_valid}")
     return is_valid, match.group(1) if match else None
 
 # Main function to process folders and extract CRM data
@@ -244,11 +301,12 @@ def process_folders(folder_paths, db_path, crm_ids):
         conn = init_db(db_path)
         # Regex to match valid CRM IDs
         crm_pattern = re.compile(r'^(?:\s*CRM\s*)?(\d{3}(?:\s*[a-zA-Z])?)$', re.IGNORECASE)
+        logger.info(f"Starting to process folders: {folder_paths}")
 
         for folder in folder_paths:
             folder_path = Path(folder).resolve()  # Resolve to absolute path
             if not folder_path.exists():
-                print(f"Folder not found: {folder_path}")
+                logger.warning(f"Folder not found: {folder_path}")
                 continue
 
             # Find all .rep, .csv, .xlsx, .xls files recursively
@@ -258,9 +316,10 @@ def process_folders(folder_paths, db_path, crm_ids):
                 files_to_process.extend(folder_path.rglob(ext))
             
             if not files_to_process:
-                print(f"No files found in {folder_path}")
+                logger.warning(f"No files found in {folder_path}")
                 continue
 
+            logger.info(f"Found {len(files_to_process)} files in {folder_path}")
             # Process .rep files (convert to .csv)
             for file_path in tqdm(files_to_process, desc=f"Converting .rep files in {folder_path}"):
                 if file_path.suffix.lower() == '.rep':
@@ -268,32 +327,37 @@ def process_folders(folder_paths, db_path, crm_ids):
                         new_file_path = file_path.with_suffix('.csv')
                         if not new_file_path.exists():  # Avoid overwriting existing .csv
                             shutil.copy(file_path, new_file_path)
+                            logger.debug(f"Converted {file_path} to {new_file_path}")
+                        else:
+                            logger.debug(f"Skipped conversion of {file_path}, CSV already exists")
                     except Exception as e:
-                        print(f"Error converting {file_path}: {str(e)}")
+                        logger.error(f"Error converting {file_path}: {str(e)}")
                         continue
 
             # Process .csv, .xlsx, .xls files
             for file_path in tqdm([f for f in files_to_process if f.suffix.lower() in ['.csv', '.xlsx', '.xls']], desc=f"Processing files in {folder_path}"):
                 try:
-                    # Check if file name starts with valid date format
-                    if not re.match(r'^\d{4}-\d{2}-\d{2}', file_path.name):
-                        print(f"Skipping file with invalid name format: {file_path.name}")
+                    # Check if file name starts with valid date format (YYYY-MM-DD or YYYY-MM-D)
+                    if not re.match(r'^\d{4}-\d{2}-\d{1,2}', file_path.name):
+                        logger.warning(f"Skipping file with invalid name format: {file_path.name}")
                         continue
 
                     # Get the relative path of the folder containing the file
                     folder_name = str(file_path.parent.relative_to(Path.cwd()))
                     date = extract_date(file_path.name)
+                    logger.debug(f"Processing {file_path.name}, folder: {folder_name}, date: {date}")
 
                     df = load_excel(file_path)
                     if df is None or df.empty:
-                        print(f"No data loaded from {file_path}")
+                        logger.warning(f"No data loaded from {file_path}")
                         continue
 
                     # Filter for Sample type
                     df_filtered = df[df['Type'].isin(['Samp', 'Sample'])].copy()
                     if df_filtered.empty:
-                        print(f"No Sample data in {file_path}")
+                        logger.warning(f"No Sample data in {file_path}")
                         continue
+                    logger.debug(f"Filtered {len(df_filtered)} Sample rows from {file_path}")
 
                     for _, row in df_filtered.iterrows():
                         solution_label = row['Solution Label']
@@ -311,21 +375,20 @@ def process_folders(folder_paths, db_path, crm_ids):
                                         VALUES (?, ?, ?, ?, ?, ?, ?)
                                     ''', (valid_crm_id, solution_label, element, float(value), file_path.name, folder_name, date))
                                     conn.commit()
-                                    #print(f"Inserted: CRM ID={valid_crm_id}, Element={element}, Value={value}, File={file_path.name}")
+                                    logger.debug(f"Inserted: CRM ID={valid_crm_id}, Solution Label={solution_label}, Element={element}, Value={value}, File={file_path.name}")
                             else:
-                                pass
-                                #print(f"Skipping invalid CRM ID: {crm_id}")
+                                logger.debug(f"Skipping invalid CRM ID: {crm_id} in {file_path.name}")
                         else:
-                            pass
-                            # print(f"No valid CRM ID found in Solution Label: {solution_label}")
+                            logger.debug(f"No valid CRM ID found in Solution Label: {solution_label} in {file_path.name}")
                 except Exception as e:
-                    # print(f"Error processing {file_path}: {str(e)}")
+                    logger.error(f"Error processing {file_path}: {str(e)}")
                     continue
 
         conn.close()
+        logger.info("Finished processing folders")
 
     except Exception as e:
-        print(f"Error in process_folders: {str(e)}")
+        logger.error(f"Error in process_folders: {str(e)}")
         if 'conn' in locals():
             conn.close()
 
@@ -333,10 +396,8 @@ def process_folders(folder_paths, db_path, crm_ids):
 if __name__ == "__main__":
     # Replace with your actual folder paths
     folder_paths = [
-        "New folder/1404 mass",
-        "New folder/1404 oes 4ac",
-        "New folder/1404 oes fire"
+        "New folder/1404 mass"
     ]
-    db_path = "crm_database.db"
+    db_path = "crm_mass.db"
     crm_ids = ['258', '252', '906', '506', '233', '255', '263', '260']
     process_folders(folder_paths, db_path, crm_ids)
