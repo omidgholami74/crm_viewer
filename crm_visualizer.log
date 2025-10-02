@@ -1,0 +1,12 @@
+2025-10-02 11:19:17,502 - INFO - Default logo loaded: logo.png
+2025-10-02 11:19:17,503 - DEBUG - Initializing CRMDataVisualizer
+2025-10-02 11:19:17,549 - DEBUG - Loading data from crm_database.db
+2025-10-02 11:19:19,183 - DEBUG - Loaded 135493 records from crm_database.db
+2025-10-02 11:19:19,540 - INFO - Loaded 134568 records after normalization and filtering
+2025-10-02 11:19:19,657 - DEBUG - Devices: ['1404 oes 4ac', '1404 oes fire']
+2025-10-02 11:19:19,657 - DEBUG - Elements: ['Ag', 'Al', 'As', 'Au', 'B', 'Ba', 'Bi', 'Ca', 'Cd', 'Ce', 'Co', 'Cr', 'Cu', 'Fe', 'Ga', 'In', 'K', 'La', 'Li', 'Mg', 'Mn', 'Mo', 'Na', 'Ni', 'P', 'Pb', 'Pd', 'Pt', 'S', 'Sb', 'Sc', 'Sn', 'Sr', 'Th', 'Ti', 'Tl', 'U', 'V', 'Y', 'Yb', 'Zn']
+2025-10-02 11:19:19,657 - DEBUG - Valid CRM IDs: ['233', '252', '255', '258', '263', '506', '906']
+2025-10-02 11:19:19,657 - DEBUG - Updating filters: {'device': 'Devices', 'element': 'Elements', 'crm': 'CRM IDs', 'from_date': None, 'to_date': None}
+2025-10-02 11:19:19,687 - DEBUG - Applying filters: {'device': 'Devices', 'element': 'Elements', 'crm': 'CRM IDs', 'from_date': None, 'to_date': None}
+2025-10-02 11:19:19,919 - DEBUG - Filtered data: 0 records
+2025-10-02 11:19:19,919 - INFO - Filtered 0 records
