@@ -490,29 +490,21 @@ class CRMDataVisualizer(QMainWindow):
         return norm in allowed
 
     def extract_device_name(self, folder_name):
-        """Extract device name from folder path or name, handling various formats."""
+        """Extract device name, allowing only 'mass', 'oes 4ac', or 'oes fire'."""
         if not folder_name or not isinstance(folder_name, str):
-            logging.warning(f"Invalid or empty folder_name: {folder_name}")
+            # logging.warning(f"Invalid or empty folder_name: {folder_name}")
             return None
-        try:
-            # Normalize path separators to handle both \ and /
-            folder_name = str(Path(folder_name)).replace('\\', '/')
-            parts = folder_name.split('/')
-            # If path has at least 2 parts (e.g., 'New folder/mass'), take the second-to-last
-            if len(parts) >= 2:
-                device = parts[-2].strip()
-                logging.debug(f"Extracted device '{device}' from folder_name '{folder_name}'")
-                return device
-            # If single part (e.g., 'mass'), use it directly
-            device = parts[-1].strip()
-            logging.debug(f"Extracted device '{device}' from single-part folder_name '{folder_name}'")
-            return device
-        except Exception as e:
-            logging.error(f"Error extracting device from folder_name '{folder_name}': {str(e)}")
-            return None
+        allowed_devices = {'mass', 'oes 4ac', 'oes fire'}
+        # Normalize folder_name to lowercase for case-insensitive comparison
+        normalized_name = folder_name.strip().lower()
+        if normalized_name in allowed_devices:
+            # logging.debug(f"Valid device found: {normalized_name}")
+            return normalized_name
+        # logging.warning(f"folder_name '{folder_name}' is not an allowed device, skipping")
+        return None
 
     def populate_filters(self):
-        """Populate filter dropdowns with unique values."""
+        """Populate filter dropdowns with hardcoded device names and other unique values."""
         if self.crm_df.empty:
             logging.warning("No CRM data available to populate filters")
             return
@@ -525,32 +517,26 @@ class CRMDataVisualizer(QMainWindow):
         self.element_combo.clear()
         self.crm_combo.clear()
 
+        # Hardcode allowed device names
         self.device_combo.addItem("All Devices")
-        self.element_combo.addItem("All Elements")
-        self.crm_combo.addItem("All CRM IDs")
-
-        # Extract unique devices, filtering out None or empty values
-        devices = set()
-        for folder in self.crm_df['folder_name']:
-            device = self.extract_device_name(folder)
-            if device:
-                devices.add(device)
-        devices = sorted(devices)
-        logging.debug(f"Unique devices extracted: {devices}")
+        self.device_combo.addItems(['mass', 'oes 4ac', 'oes fire'])
 
         elements = sorted(set(el.split()[0] for el in self.crm_df['element'].unique() if isinstance(el, str)))
         crms = sorted(self.crm_df['norm_crm_id'].unique())
 
-        logging.debug(f"Elements: {elements}")
-        logging.debug(f"Valid CRM IDs: {crms}")
+        # logging.debug(f"Devices hardcoded: ['mass', 'oes 4ac', 'oes fire']")
+        # logging.debug(f"Elements: {elements}")
+        # logging.debug(f"Valid CRM IDs: {crms}")
 
-        self.device_combo.addItems(devices)
+        self.element_combo.addItem("All Elements")
         self.element_combo.addItems(elements)
+        self.crm_combo.addItem("All CRM IDs")
         self.crm_combo.addItems(crms)
 
         self.device_combo.blockSignals(False)
         self.element_combo.blockSignals(False)
         self.crm_combo.blockSignals(False)
+
         self.update_filters()
 
     def update_filters(self):
