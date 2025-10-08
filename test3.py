@@ -490,9 +490,26 @@ class CRMDataVisualizer(QMainWindow):
         return norm in allowed
 
     def extract_device_name(self, folder_name):
-        """Extract device name from folder path."""
-        parts = folder_name.split('\\')
-        return parts[1].strip() if len(parts) >= 3 else None
+        """Extract device name from folder path or name, handling various formats."""
+        if not folder_name or not isinstance(folder_name, str):
+            logging.warning(f"Invalid or empty folder_name: {folder_name}")
+            return None
+        try:
+            # Normalize path separators to handle both \ and /
+            folder_name = str(Path(folder_name)).replace('\\', '/')
+            parts = folder_name.split('/')
+            # If path has at least 2 parts (e.g., 'New folder/mass'), take the second-to-last
+            if len(parts) >= 2:
+                device = parts[-2].strip()
+                logging.debug(f"Extracted device '{device}' from folder_name '{folder_name}'")
+                return device
+            # If single part (e.g., 'mass'), use it directly
+            device = parts[-1].strip()
+            logging.debug(f"Extracted device '{device}' from single-part folder_name '{folder_name}'")
+            return device
+        except Exception as e:
+            logging.error(f"Error extracting device from folder_name '{folder_name}': {str(e)}")
+            return None
 
     def populate_filters(self):
         """Populate filter dropdowns with unique values."""
@@ -512,11 +529,18 @@ class CRMDataVisualizer(QMainWindow):
         self.element_combo.addItem("All Elements")
         self.crm_combo.addItem("All CRM IDs")
 
-        devices = sorted(set(self.extract_device_name(folder) for folder in self.crm_df['folder_name'] if self.extract_device_name(folder)))
+        # Extract unique devices, filtering out None or empty values
+        devices = set()
+        for folder in self.crm_df['folder_name']:
+            device = self.extract_device_name(folder)
+            if device:
+                devices.add(device)
+        devices = sorted(devices)
+        logging.debug(f"Unique devices extracted: {devices}")
+
         elements = sorted(set(el.split()[0] for el in self.crm_df['element'].unique() if isinstance(el, str)))
         crms = sorted(self.crm_df['norm_crm_id'].unique())
 
-        logging.debug(f"Devices: {devices}")
         logging.debug(f"Elements: {elements}")
         logging.debug(f"Valid CRM IDs: {crms}")
 
@@ -527,7 +551,6 @@ class CRMDataVisualizer(QMainWindow):
         self.device_combo.blockSignals(False)
         self.element_combo.blockSignals(False)
         self.crm_combo.blockSignals(False)
-
         self.update_filters()
 
     def update_filters(self):
