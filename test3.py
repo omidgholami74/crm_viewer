@@ -3,13 +3,18 @@ import sqlite3
 import pandas as pd
 import re
 import logging
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                             QComboBox, QPushButton, QTableWidget, QTableWidgetItem, 
-                             QHeaderView, QProgressBar, QMessageBox, QLineEdit, 
-                             QFileDialog, QMenuBar, QCheckBox, QLabel)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QFont, QPixmap, QAction
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QTableWidget, QTableWidgetItem, QHeaderView, QProgressBar, QMessageBox,
+    QFileDialog, QLabel
+)
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtGui import QFont, QPixmap
 from pyqtgraph import PlotWidget, mkPen
+from qfluentwidgets import (
+    ComboBox, LineEdit, PrimaryPushButton, CheckBox, CardWidget,
+    setTheme, Theme, FluentIcon, TitleLabel
+)
 from persiantools.jdatetime import JalaliDate
 import numpy as np
 from pathlib import Path
@@ -52,7 +57,7 @@ def validate_percentage(text):
         return False
 
 class DataLoaderThread(QThread):
-    data_loaded = pyqtSignal(pd.DataFrame)
+    data_loaded = pyqtSignal(pd.DataFrame, pd.DataFrame)
     error_occurred = pyqtSignal(str)
     progress_updated = pyqtSignal(int)
 
@@ -74,9 +79,14 @@ class DataLoaderThread(QThread):
             df['year'] = df['date'].apply(lambda x: x.year)
             df['month'] = df['date'].apply(lambda x: x.month)
             df['day'] = df['date'].apply(lambda x: x.day)
+            self.progress_updated.emit(80)
+
+            crm_df = df[df['crm_id'] != 'BLANK'].copy()
+            blank_df = df[df['crm_id'] == 'BLANK'].copy()
+            crm_df['norm_crm_id'] = crm_df['crm_id'].apply(normalize_crm_id)
             self.progress_updated.emit(100)
-            logging.debug(f"Loaded {len(df)} records from {self.db_path}")
-            self.data_loaded.emit(df)
+            logging.debug(f"Loaded {len(crm_df)} CRM records and {len(blank_df)} BLANK records from {self.db_path}")
+            self.data_loaded.emit(crm_df, blank_df)
         except Exception as e:
             logging.error(f"Data loading error: {str(e)}")
             self.error_occurred.emit(f"Failed to load data: {str(e)}")
@@ -128,48 +138,60 @@ class ImportFileThread(QThread):
             self.error_occurred.emit(f"Failed to import file: {str(e)}")
 
 class FilterThread(QThread):
-    filtered_data = pyqtSignal(pd.DataFrame)
+    filtered_data = pyqtSignal(pd.DataFrame, pd.DataFrame)
     progress_updated = pyqtSignal(int)
 
-    def __init__(self, df, filters):
+    def __init__(self, crm_df, blank_df, filters):
         super().__init__()
-        self.df = df
+        self.crm_df = crm_df
+        self.blank_df = blank_df
         self.filters = filters
 
     def run(self):
-        filtered_df = self.df.copy()
+        filtered_crm_df = self.crm_df.copy()
+        filtered_blank_df = self.blank_df.copy()
         logging.debug(f"Applying filters: {self.filters}")
         self.progress_updated.emit(20)
+        
         if self.filters['device'] != "All Devices":
-            filtered_df = filtered_df[filtered_df['folder_name'].str.contains(self.filters['device'], case=False, na=False)]
+            filtered_crm_df = filtered_crm_df[filtered_crm_df['folder_name'].str.contains(self.filters['device'], case=False, na=False)]
+            filtered_blank_df = filtered_blank_df[filtered_blank_df['folder_name'].str.contains(self.filters['device'], case=False, na=False)]
         self.progress_updated.emit(40)
+        
         if self.filters['element'] != "All Elements":
             base_element = self.filters['element']
-            filtered_df = filtered_df[filtered_df['element'].str.startswith(base_element + ' ', na=False) | (filtered_df['element'] == base_element)]
+            filtered_crm_df = filtered_crm_df[filtered_crm_df['element'].str.startswith(base_element + ' ', na=False) | (filtered_crm_df['element'] == base_element)]
+            filtered_blank_df = filtered_blank_df[filtered_blank_df['element'].str.startswith(base_element + ' ', na=False) | (filtered_blank_df['element'] == base_element)]
         self.progress_updated.emit(60)
+        
         if self.filters['crm'] != "All CRM IDs":
-            filtered_df = filtered_df[filtered_df['norm_crm_id'] == self.filters['crm']]
+            filtered_crm_df = filtered_crm_df[filtered_crm_df['norm_crm_id'] == self.filters['crm']]
         
         if self.filters['from_date']:
-            filtered_df = filtered_df[filtered_df['date'] >= self.filters['from_date']]
+            filtered_crm_df = filtered_crm_df[filtered_crm_df['date'] >= self.filters['from_date']]
+            filtered_blank_df = filtered_blank_df[filtered_blank_df['date'] >= self.filters['from_date']]
         if self.filters['to_date']:
-            filtered_df = filtered_df[filtered_df['date'] <= self.filters['to_date']]
+            filtered_crm_df = filtered_crm_df[filtered_crm_df['date'] <= self.filters['to_date']]
+            filtered_blank_df = filtered_blank_df[filtered_blank_df['date'] <= self.filters['to_date']]
         
         self.progress_updated.emit(100)
-        logging.debug(f"Filtered data: {len(filtered_df)} records")
-        self.filtered_data.emit(filtered_df)
+        logging.debug(f"Filtered {len(filtered_crm_df)} CRM records and {len(filtered_blank_df)} BLANK records")
+        self.filtered_data.emit(filtered_crm_df, filtered_blank_df)
 
 class CRMDataVisualizer(QMainWindow):
     def __init__(self):
         super().__init__()
+        setTheme(Theme.LIGHT)  # Set Fluent light theme
         self.setWindowTitle("CRM Data Visualizer")
-        self.setGeometry(100, 100, 1200, 800)
+        self.setGeometry(100, 100, 1400, 900)
 
         # Initialize data
-        self.df = pd.DataFrame()
-        self.crm_db_path = self.get_db_path("crm_database.db")
+        self.crm_df = pd.DataFrame()
+        self.blank_df = pd.DataFrame()
+        self.crm_db_path = self.get_db_path("crm_blank.db")
         self.ver_db_path = self.get_db_path("crm_data.db")
-        self.filtered_df_cache = None
+        self.filtered_crm_df_cache = None
+        self.filtered_blank_df_cache = None
         self.plot_df_cache = None
         self.updating_filters = False
         self.verification_cache = {}
@@ -180,72 +202,155 @@ class CRMDataVisualizer(QMainWindow):
         self.main_widget = QWidget()
         self.setCentralWidget(self.main_widget)
         self.main_layout = QVBoxLayout(self.main_widget)
-        self.main_layout.setSpacing(10)
-        self.main_layout.setContentsMargins(10, 10, 10, 10)
+        self.main_layout.setSpacing(16)
+        self.main_layout.setContentsMargins(20, 20, 20, 20)
 
-        # Menu bar
-        self.menu_bar = QMenuBar()
-        self.file_menu = self.menu_bar.addMenu("File")
-        self.import_action = QAction("Import File", self)
-        self.export_action = QAction("Export Table", self)
-        self.file_menu.addAction(self.import_action)
-        self.file_menu.addAction(self.export_action)
-        self.import_action.triggered.connect(self.import_file)
-        self.export_action.triggered.connect(self.export_table)
-        self.main_layout.addWidget(self.menu_bar)
+        # Button section (boxed with CardWidget)
+        self.button_card = CardWidget()
+        self.button_card.setStyleSheet("""
+            CardWidget {
+                background-color: #FFFFFF;
+                border: 1px solid #E0E0E0;
+                border-radius: 8px;
+                box-shadow: 0px 4px 12px rgba(0, 0, 0, 0.15);
+            }
+        """)
+        self.button_layout = QHBoxLayout()
+        self.button_layout.setSpacing(12)
+        self.button_layout.setContentsMargins(15, 10, 15, 10)
+        self.import_button = PrimaryPushButton("Import File", self, FluentIcon.DOWNLOAD)
+        self.export_button = PrimaryPushButton("Export Table", self, FluentIcon.SAVE)
+        self.plot_button = PrimaryPushButton("Plot Data", self)
+        self.save_button = PrimaryPushButton("Save Plot", self, FluentIcon.SAVE)
+        self.reset_button = PrimaryPushButton("Reset Filters", self, FluentIcon.SYNC)
+        self.button_layout.addWidget(self.import_button)
+        self.button_layout.addWidget(self.export_button)
+        self.button_layout.addWidget(self.plot_button)
+        self.button_layout.addWidget(self.save_button)
+        self.button_layout.addWidget(self.reset_button)
+        self.button_layout.addStretch()
+        self.button_card.setLayout(self.button_layout)
+        self.main_layout.addWidget(self.button_card)
 
-        # Filter layout
-        self.filter_layout = QHBoxLayout()
-        self.filter_layout.setSpacing(8)
-        self.logo_label = QLabel()
-        self.logo_label.setFixedSize(120, 60)
-        self.device_combo = QComboBox()
-        self.element_combo = QComboBox()
-        self.crm_combo = QComboBox()
-        self.from_date_edit = QLineEdit()
-        self.to_date_edit = QLineEdit()
-        self.percentage_edit = QLineEdit("10")
-        self.best_wl_check = QCheckBox("Select Best Wavelength")
-        self.best_wl_check.setChecked(True)
+        # Filter and logo section
+        self.filter_logo_layout = QHBoxLayout()
+        self.filter_logo_layout.setSpacing(16)
 
-        self.device_combo.setToolTip("Select Device")
-        self.element_combo.setToolTip("Select Element")
-        self.crm_combo.setToolTip("Select CRM ID")
-        self.from_date_edit.setToolTip("Enter From Date (YYYY/MM/DD Jalali)")
-        self.to_date_edit.setToolTip("Enter To Date (YYYY/MM/DD Jalali)")
-        self.percentage_edit.setToolTip("Enter Control Range Percentage (e.g., 10 for ±10%)")
-        self.best_wl_check.setToolTip("Select best wavelength based on verification value")
+        # Filter section (boxed with CardWidget)
+        self.filter_card = CardWidget()
+        self.filter_card.setStyleSheet("""
+            CardWidget {
+                background-color: #FFFFFF;
+                border: 1px solid #E0E0E0;
+                border-radius: 8px;
+                box-shadow: 0px 4px 12px rgba(0, 0, 0, 0.15);
+            }
+        """)
+        self.filter_layout = QVBoxLayout()
+        self.filter_layout.setSpacing(12)
+        self.filter_layout.setContentsMargins(15, 15, 15, 15)
 
-        self.from_date_edit.setPlaceholderText("YYYY/MM/DD (Jalali)")
-        self.to_date_edit.setPlaceholderText("YYYY/MM/DD (Jalali)")
-        self.percentage_edit.setPlaceholderText("% (e.g., 10)")
+        # Title for filter card
+        self.filter_title = TitleLabel("Filter Controls")
+        self.filter_title.setStyleSheet("""
+            TitleLabel {
+                color: #000000;
+                font-size: 18px;
+                font-weight: bold;
+                padding: 8px 0;
+            }
+        """)
+        self.filter_layout.addWidget(self.filter_title)
+
+        # Controls in one row (except checkboxes)
+        self.controls_layout = QHBoxLayout()
+        self.controls_layout.setSpacing(12)
+        self.device_label = QLabel("Device:")
+        self.device_combo = ComboBox()
+        self.element_label = QLabel("Element:")
+        self.element_combo = ComboBox()
+        self.crm_label = QLabel("CRM ID:")
+        self.crm_combo = ComboBox()
+        self.from_date_label = QLabel("From Date:")
+        self.from_date_edit = LineEdit()
+        self.from_date_edit.setPlaceholderText("YYYY/MM/DD")
         self.from_date_edit.setFixedWidth(120)
+        self.to_date_label = QLabel("To Date:")
+        self.to_date_edit = LineEdit()
+        self.to_date_edit.setPlaceholderText("YYYY/MM/DD")
         self.to_date_edit.setFixedWidth(120)
+        self.percentage_label = QLabel("Control Range (%):")
+        self.percentage_edit = LineEdit()
+        self.percentage_edit.setPlaceholderText("%")
         self.percentage_edit.setFixedWidth(80)
+        self.percentage_edit.setText("10")
+        self.controls_layout.addWidget(self.device_label)
+        self.controls_layout.addWidget(self.device_combo)
+        self.controls_layout.addWidget(self.element_label)
+        self.controls_layout.addWidget(self.element_combo)
+        self.controls_layout.addWidget(self.crm_label)
+        self.controls_layout.addWidget(self.crm_combo)
+        self.controls_layout.addWidget(self.from_date_label)
+        self.controls_layout.addWidget(self.from_date_edit)
+        self.controls_layout.addWidget(self.to_date_label)
+        self.controls_layout.addWidget(self.to_date_edit)
+        self.controls_layout.addWidget(self.percentage_label)
+        self.controls_layout.addWidget(self.percentage_edit)
+        self.controls_layout.addStretch()
+        self.filter_layout.addLayout(self.controls_layout)
 
+        # Checkboxes in one column
+        self.checkbox_layout = QVBoxLayout()
+        self.checkbox_layout.setSpacing(8)
+        self.best_wl_check = CheckBox("Select Best Wavelength")
+        self.best_wl_check.setChecked(True)
+        self.apply_blank_check = CheckBox("Apply Blank Correction")
+        self.apply_blank_check.setChecked(False)
+        self.checkbox_layout.addWidget(self.best_wl_check)
+        self.checkbox_layout.addWidget(self.apply_blank_check)
+        self.checkbox_layout.addStretch()
+        self.filter_layout.addLayout(self.checkbox_layout)
+
+        # Tooltips
+        self.device_combo.setToolTip("Select a device to filter data")
+        self.element_combo.setToolTip("Select an element to plot")
+        self.crm_combo.setToolTip("Select a CRM ID to filter")
+        self.from_date_edit.setToolTip("Enter start date in Jalali format (YYYY/MM/DD)")
+        self.to_date_edit.setToolTip("Enter end date in Jalali format (YYYY/MM/DD)")
+        self.percentage_edit.setToolTip("Enter control range percentage (e.g., 10 for ±10%)")
+        self.best_wl_check.setToolTip("Select the best wavelength based on verification value")
+        self.apply_blank_check.setToolTip("Subtract the best BLANK value from CRM data")
+
+        # Populate combo boxes
         self.device_combo.addItem("All Devices")
         self.element_combo.addItem("All Elements")
         self.crm_combo.addItem("All CRM IDs")
-        self.filter_layout.addWidget(self.device_combo)
-        self.filter_layout.addWidget(self.element_combo)
-        self.filter_layout.addWidget(self.crm_combo)
-        self.filter_layout.addWidget(self.from_date_edit)
-        self.filter_layout.addWidget(self.to_date_edit)
-        self.filter_layout.addWidget(self.percentage_edit)
-        self.filter_layout.addWidget(self.best_wl_check)
 
-        # Buttons
-        self.button_layout = QHBoxLayout()
-        self.button_layout.setSpacing(8)
-        self.plot_button = QPushButton("Plot Data")
-        self.save_button = QPushButton("Save Plot")
-        self.reset_button = QPushButton("Reset Filters")
-        self.filter_layout.addWidget(self.plot_button)
-        self.filter_layout.addWidget(self.save_button)
-        self.filter_layout.addWidget(self.reset_button)
-        self.filter_layout.addStretch()
-        self.filter_layout.addWidget(self.logo_label)
-        self.main_layout.addLayout(self.filter_layout)
+        # Set layout to filter card
+        self.filter_card.setLayout(self.filter_layout)
+
+        # Logo section (boxed with CardWidget)
+        self.logo_card = CardWidget()
+        self.logo_card.setStyleSheet("""
+            CardWidget {
+                background-color: #FFFFFF;
+                border: 1px solid #E0E0E0;
+                border-radius: 8px;
+                box-shadow: 0px 4px 12px rgba(0, 0, 0, 0.15);
+            }
+        """)
+        self.logo_layout = QVBoxLayout()
+        self.logo_layout.setContentsMargins(10, 10, 10, 10)
+        self.logo_label = QLabel()
+        self.logo_label.setFixedSize(100, 50)
+        self.logo_layout.addWidget(self.logo_label)
+        self.logo_card.setLayout(self.logo_layout)
+        self.logo_card.setFixedWidth(120)
+
+        # Add filter and logo to layout
+        self.filter_logo_layout.addWidget(self.filter_card, stretch=1)
+        self.filter_logo_layout.addWidget(self.logo_card)
+        self.main_layout.addLayout(self.filter_logo_layout)
 
         # Progress bar
         self.progress_bar = QProgressBar()
@@ -255,23 +360,31 @@ class CRMDataVisualizer(QMainWindow):
 
         # Plot widget
         self.plot_widget = PlotWidget()
-        self.plot_widget.setTitle("CRM Data Plot", color='#333333', size='12pt')
-        self.plot_widget.setLabel('left', 'Value', color='#333333')
-        self.plot_widget.setLabel('bottom', 'Observation', color='#333333')
+        self.plot_widget.setTitle("CRM Data Plot", color='#000000', size='14pt')
+        self.plot_widget.setLabel('left', 'Value', color='#000000')
+        self.plot_widget.setLabel('bottom', 'Observation', color='#000000')
         self.plot_widget.addLegend(offset=(10, 10))
         self.main_layout.addWidget(self.plot_widget, stretch=2)
 
         # Tooltip label
         self.tooltip_label = QLabel("", self.plot_widget)
-        self.tooltip_label.setStyleSheet("background-color: #FFFFFF; border: 1px solid #333333; padding: 5px; border-radius: 3px;")
+        self.tooltip_label.setStyleSheet("""
+            background-color: #FFFFFF;
+            color: #000000;
+            border: 1px solid #0078D4;
+            padding: 8px;
+            border-radius: 4px;
+            font-family: 'Segoe UI';
+            box-shadow: 2px 2px 8px rgba(0, 0, 0, 0.2);
+        """)
         self.tooltip_label.setVisible(False)
-        self.tooltip_label.setFont(QFont("Arial", 10))
+        self.tooltip_label.setFont(QFont("Segoe UI", 10))
 
         # Table widget
         self.table_widget = QTableWidget()
-        self.table_widget.setColumnCount(7)
-        self.table_widget.setHorizontalHeaderLabels(["ID", "CRM ID", "Solution Label", "Element", "Value", "File Name", "Folder Name"])
-        self.table_widget.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table_widget.setColumnCount(8)
+        self.table_widget.setHorizontalHeaderLabels(["ID", "CRM ID", "Solution Label", "Element", "Value", "File Name", "Folder Name", "Date"])
+        self.table_widget.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.main_layout.addWidget(self.table_widget, stretch=1)
 
         # Status label
@@ -286,6 +399,9 @@ class CRMDataVisualizer(QMainWindow):
         self.to_date_edit.textChanged.connect(self.on_filter_changed)
         self.percentage_edit.textChanged.connect(self.on_filter_changed)
         self.best_wl_check.stateChanged.connect(self.on_filter_changed)
+        self.apply_blank_check.stateChanged.connect(self.on_filter_changed)
+        self.import_button.clicked.connect(self.import_file)
+        self.export_button.clicked.connect(self.export_table)
         self.plot_button.clicked.connect(self.plot_data)
         self.save_button.clicked.connect(self.save_plot)
         self.reset_button.clicked.connect(self.reset_filters)
@@ -308,7 +424,7 @@ class CRMDataVisualizer(QMainWindow):
         """Load logo image if exists."""
         if self.logo_path.exists():
             pixmap = QPixmap(str(self.logo_path))
-            self.logo_label.setPixmap(pixmap.scaled(120, 60, Qt.AspectRatioMode.KeepAspectRatio))
+            self.logo_label.setPixmap(pixmap.scaled(100, 50, Qt.KeepAspectRatio))
             logging.info(f"Default logo loaded: {self.logo_path}")
         else:
             logging.warning(f"Default logo not found at: {self.logo_path}")
@@ -341,19 +457,20 @@ class CRMDataVisualizer(QMainWindow):
         self.status_label.setText(f"Imported {len(df)} records successfully")
         logging.info(f"Imported {len(df)} records successfully")
 
-    def on_data_loaded(self, df):
+    def on_data_loaded(self, crm_df, blank_df):
         """Process loaded data and populate filters."""
-        df['norm_crm_id'] = df['crm_id'].apply(normalize_crm_id)
         allowed_crms = ['258', '252', '906', '506', '233', '255', '263', '269']
-        df = df[df['norm_crm_id'].isin(allowed_crms)].dropna(subset=['norm_crm_id'])
-        self.df = df
-        logging.info(f"Loaded {len(df)} records after normalization and filtering")
+        crm_df = crm_df[crm_df['norm_crm_id'].isin(allowed_crms)].dropna(subset=['norm_crm_id'])
+        self.crm_df = crm_df
+        self.blank_df = blank_df
+        logging.info(f"Loaded {len(crm_df)} CRM records and {len(blank_df)} BLANK records after normalization")
         self.populate_filters()
         self.status_label.setText("Data loaded successfully")
 
     def on_data_error(self, error_message):
         """Handle data loading errors."""
-        self.df = pd.DataFrame()
+        self.crm_df = pd.DataFrame()
+        self.blank_df = pd.DataFrame()
         self.status_label.setText(error_message)
         logging.error(error_message)
         QMessageBox.critical(self, "Error", error_message)
@@ -379,8 +496,8 @@ class CRMDataVisualizer(QMainWindow):
 
     def populate_filters(self):
         """Populate filter dropdowns with unique values."""
-        if self.df.empty:
-            logging.warning("No data available to populate filters")
+        if self.crm_df.empty:
+            logging.warning("No CRM data available to populate filters")
             return
 
         self.device_combo.blockSignals(True)
@@ -395,9 +512,9 @@ class CRMDataVisualizer(QMainWindow):
         self.element_combo.addItem("All Elements")
         self.crm_combo.addItem("All CRM IDs")
 
-        devices = sorted(set(self.extract_device_name(folder) for folder in self.df['folder_name'] if self.extract_device_name(folder)))
-        elements = sorted(set(el.split()[0] for el in self.df['element'].unique() if isinstance(el, str)))
-        crms = sorted(self.df['norm_crm_id'].unique())
+        devices = sorted(set(self.extract_device_name(folder) for folder in self.crm_df['folder_name'] if self.extract_device_name(folder)))
+        elements = sorted(set(el.split()[0] for el in self.crm_df['element'].unique() if isinstance(el, str)))
+        crms = sorted(self.crm_df['norm_crm_id'].unique())
 
         logging.debug(f"Devices: {devices}")
         logging.debug(f"Elements: {elements}")
@@ -420,10 +537,10 @@ class CRMDataVisualizer(QMainWindow):
         self.updating_filters = True
 
         try:
-            if self.df.empty:
+            if self.crm_df.empty:
                 self.table_widget.setRowCount(0)
-                self.status_label.setText("No data available")
-                logging.warning("No data available for filtering")
+                self.status_label.setText("No CRM data available")
+                logging.warning("No CRM data available for filtering")
                 self.updating_filters = False
                 return
 
@@ -447,7 +564,7 @@ class CRMDataVisualizer(QMainWindow):
             logging.debug(f"Updating filters: {filters}")
 
             self.progress_bar.setVisible(True)
-            self.filter_thread = FilterThread(self.df, filters)
+            self.filter_thread = FilterThread(self.crm_df, self.blank_df, filters)
             self.filter_thread.filtered_data.connect(self.on_filtered_data)
             self.filter_thread.progress_updated.connect(self.progress_bar.setValue)
             self.filter_thread.finished.connect(lambda: self.progress_bar.setVisible(False))
@@ -456,13 +573,14 @@ class CRMDataVisualizer(QMainWindow):
         finally:
             self.updating_filters = False
 
-    def on_filtered_data(self, filtered_df):
+    def on_filtered_data(self, filtered_crm_df, filtered_blank_df):
         """Update table and cache filtered data."""
-        self.filtered_df_cache = filtered_df
+        self.filtered_crm_df_cache = filtered_crm_df
+        self.filtered_blank_df_cache = filtered_blank_df
         QApplication.processEvents()
-        self.update_table(filtered_df)
-        self.status_label.setText(f"Loaded {len(filtered_df)} records")
-        logging.info(f"Filtered {len(filtered_df)} records")
+        self.update_table(filtered_crm_df)
+        self.status_label.setText(f"Loaded {len(filtered_crm_df)} CRM records, {len(filtered_blank_df)} BLANK records")
+        logging.info(f"Filtered {len(filtered_crm_df)} CRM records and {len(filtered_blank_df)} BLANK records")
 
     def update_table(self, df):
         """Populate table with filtered data."""
@@ -476,6 +594,7 @@ class CRMDataVisualizer(QMainWindow):
             self.table_widget.setItem(i, 4, QTableWidgetItem(str(row['value'])))
             self.table_widget.setItem(i, 5, QTableWidgetItem(row['file_name']))
             self.table_widget.setItem(i, 6, QTableWidgetItem(row['folder_name']))
+            self.table_widget.setItem(i, 7, QTableWidgetItem(row['date'].strftime("%Y/%m/%d")))
 
     def export_table(self):
         """Export table data to CSV."""
@@ -567,15 +686,46 @@ class CRMDataVisualizer(QMainWindow):
             if 'conn' in locals():
                 conn.close()
 
+    def select_best_blank(self, crm_row, blank_df, ver_value):
+        """Select the best BLANK that brings CRM value closest to verification value."""
+        if blank_df.empty or ver_value is None:
+            return None, crm_row['value']
+        
+        relevant_blanks = blank_df[
+            (blank_df['file_name'] == crm_row['file_name']) &
+            (blank_df['folder_name'] == crm_row['folder_name']) &
+            (blank_df['element'] == crm_row['element'])
+        ]
+        
+        if relevant_blanks.empty:
+            return None, crm_row['value']
+        
+        best_blank_value = None
+        best_diff = float('inf')
+        corrected_value = crm_row['value']
+        
+        for _, blank_row in relevant_blanks.iterrows():
+            blank_value = blank_row['value']
+            if pd.notna(blank_value):
+                corrected = crm_row['value'] - blank_value
+                diff = abs(corrected - ver_value)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_blank_value = blank_value
+                    corrected_value = corrected
+        
+        return best_blank_value, corrected_value
+
     def plot_data(self):
-        """Plot filtered data with control lines."""
+        """Plot filtered data with control lines and optional blank correction."""
         self.plot_widget.clear()
         self.plot_data_items = []
-        filtered_df = self.filtered_df_cache if self.filtered_df_cache is not None else self.df
+        filtered_crm_df = self.filtered_crm_df_cache if self.filtered_crm_df_cache is not None else self.crm_df
+        filtered_blank_df = self.filtered_blank_df_cache if self.filtered_blank_df_cache is not None else self.blank_df
 
-        if filtered_df.empty:
-            self.status_label.setText("No data to plot")
-            logging.info("No data to plot due to empty filtered dataframe")
+        if filtered_crm_df.empty:
+            self.status_label.setText("No CRM data to plot")
+            logging.info("No CRM data to plot due to empty filtered dataframe")
             self.plot_df_cache = pd.DataFrame()
             self.update_table(self.plot_df_cache)
             return
@@ -587,37 +737,43 @@ class CRMDataVisualizer(QMainWindow):
             logging.warning(f"Invalid percentage value: {self.percentage_edit.text()}, using default 10%")
             self.percentage_edit.setText("10")
 
-        filtered_df = filtered_df.sort_values('date')
+        filtered_crm_df = filtered_crm_df.sort_values('date')
         current_element = self.element_combo.currentText()
         current_crm = self.crm_combo.currentText()
-        colors = ['r', 'g', 'b', 'c', 'm', 'y', 'k']
+        colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEEAD', '#D4A5A5', '#9B59B6']
         plot_df = pd.DataFrame()
 
-        crm_ids = [current_crm] if current_crm != "All CRM IDs" else filtered_df['norm_crm_id'].unique()
+        crm_ids = [current_crm] if current_crm != "All CRM IDs" else filtered_crm_df['norm_crm_id'].unique()
         logging.debug(f"Plotting for CRM IDs: {crm_ids}")
 
         for idx, crm_id in enumerate(crm_ids):
-            crm_df = filtered_df[filtered_df['norm_crm_id'] == crm_id]
+            crm_df = filtered_crm_df[filtered_crm_df['norm_crm_id'] == crm_id]
             if crm_df.empty:
                 logging.debug(f"No data for CRM ID {crm_id}")
                 continue
 
-            if current_element != "All Elements" and self.best_wl_check.isChecked():
-                ver_value = self.get_verification_value(crm_id, current_element)
-                if ver_value is not None:
-                    def select_best(group):
-                        group['diff'] = abs(group['value'] - ver_value)
-                        return group.loc[group['diff'].idxmin()]
-                    crm_df = crm_df.groupby(['year', 'month', 'day']).apply(select_best).reset_index(drop=True)
-                else:
-                    logging.warning(f"No verification value for {crm_id}, {current_element}")
+            ver_value = self.get_verification_value(crm_id, current_element) if current_element != "All Elements" else None
+
+            if current_element != "All Elements" and self.best_wl_check.isChecked() and ver_value is not None:
+                def select_best(group):
+                    group['diff'] = abs(group['value'] - ver_value)
+                    return group.loc[group['diff'].idxmin()]
+                crm_df = crm_df.groupby(['year', 'month', 'day']).apply(select_best).reset_index(drop=True)
+
+            if self.apply_blank_check.isChecked() and current_element != "All Elements" and ver_value is not None:
+                crm_df = crm_df.copy()
+                crm_df['original_value'] = crm_df['value']
+                crm_df['blank_value'] = None
+                for i, row in crm_df.iterrows():
+                    blank_value, corrected_value = self.select_best_blank(row, filtered_blank_df, ver_value)
+                    crm_df.at[i, 'value'] = corrected_value
+                    crm_df.at[i, 'blank_value'] = blank_value
 
             indices = np.arange(len(crm_df))
             values = crm_df['value'].values
             date_labels = [d.strftime("%Y/%m/%d") for d in crm_df['date']]
             logging.debug(f"CRM {crm_id}: {len(indices)} points, values range: {min(values, default=0):.2f} - {max(values, default=0):.2f}")
 
-            # Remove sampling to ensure all points are plotted
             pen = mkPen(color=colors[idx % len(colors)], width=2)
             plot_item = self.plot_widget.plot(indices, values, pen=pen, symbol='o', symbolSize=8, name=f"CRM {crm_id}")
             self.plot_data_items.append((plot_item, crm_df, indices, date_labels))
@@ -628,24 +784,24 @@ class CRMDataVisualizer(QMainWindow):
                 if ver_value is not None and not pd.isna(ver_value):
                     x_range = [0, max(indices, default=0)]
                     delta = ver_value * (percentage / 100) / 3
-                    self.plot_widget.plot(x_range, [ver_value * (1 - percentage / 100)] * 2, pen=mkPen('b', width=2, style=Qt.PenStyle.DotLine), name="LCL")
-                    self.plot_widget.plot(x_range, [ver_value - 2 * delta] * 2, pen=mkPen('c', width=1, style=Qt.PenStyle.DotLine), name="-2LS")
-                    self.plot_widget.plot(x_range, [ver_value - delta] * 2, pen=mkPen('c', width=1, style=Qt.PenStyle.DotLine), name="-1LS")
-                    self.plot_widget.plot(x_range, [ver_value] * 2, pen=mkPen('k', width=3, style=Qt.PenStyle.DashLine), name=f"Ref Value ({ver_value:.3f})")
-                    self.plot_widget.plot(x_range, [ver_value + delta] * 2, pen=mkPen('m', width=1, style=Qt.PenStyle.DotLine), name="1LS")
-                    self.plot_widget.plot(x_range, [ver_value + 2 * delta] * 2, pen=mkPen('m', width=1, style=Qt.PenStyle.DotLine), name="2LS")
-                    self.plot_widget.plot(x_range, [ver_value * (1 + percentage / 100)] * 2, pen=mkPen('r', width=2, style=Qt.PenStyle.DotLine), name="UCL")
+                    self.plot_widget.plot(x_range, [ver_value * (1 - percentage / 100)] * 2, pen=mkPen('#FF6B6B', width=2, style=Qt.DotLine), name="LCL")
+                    self.plot_widget.plot(x_range, [ver_value - 2 * delta] * 2, pen=mkPen('#4ECDC4', width=1, style=Qt.DotLine), name="-2LS")
+                    self.plot_widget.plot(x_range, [ver_value - delta] * 2, pen=mkPen('#4ECDC4', width=1, style=Qt.DotLine), name="-1LS")
+                    self.plot_widget.plot(x_range, [ver_value] * 2, py=mkPen('#000000', width=3, style=Qt.DashLine), name=f"Ref Value ({ver_value:.3f})")
+                    self.plot_widget.plot(x_range, [ver_value + delta] * 2, pen=mkPen('#45B7D1', width=1, style=Qt.DotLine), name="1LS")
+                    self.plot_widget.plot(x_range, [ver_value + 2 * delta] * 2, pen=mkPen('#45B7D1', width=1, style=Qt.DotLine), name="2LS")
+                    self.plot_widget.plot(x_range, [ver_value * (1 + percentage / 100)] * 2, pen=mkPen('#FF6B6B', width=2, style=Qt.DotLine), name="UCL")
                     logging.info(f"Plotted control lines for CRM {crm_id}, Element {current_element}")
 
-        self.plot_df_cache = plot_df.append(crm_df, ignore_index=True) if not crm_df.empty else plot_df
+        self.plot_df_cache = pd.concat([plot_df, crm_df], ignore_index=True) if not crm_df.empty else plot_df
         self.update_table(self.plot_df_cache)
         self.plot_widget.showGrid(x=True, y=True)
         self.status_label.setText(f"Plotted {len(self.plot_df_cache)} records")
         logging.info(f"Plotted {len(self.plot_df_cache)} records")
 
     def on_mouse_clicked(self, event):
-        """Show point info on click."""
-        if event.button() == Qt.MouseButton.LeftButton:
+        """Show point info on click, including BLANK data."""
+        if event.button() == Qt.LeftButton:
             pos = self.plot_widget.getViewBox().mapSceneToView(event.scenePos())
             x, y = pos.x(), pos.y()
             logging.debug(f"Click at view coordinates: x={x:.2f}, y={y:.2f}")
@@ -656,17 +812,36 @@ class CRMDataVisualizer(QMainWindow):
                 for i, (idx, value, date) in enumerate(zip(indices, crm_df['value'], date_labels)):
                     dist = ((idx - x) ** 2 + (value - y) ** 2) ** 0.5
                     logging.debug(f"Point {i}: index={idx}, value={value:.2f}, dist={dist:.2f}")
-                    if dist < 10:  # Increased threshold
+                    if dist < 10:
                         closest_dist = dist
                         element = crm_df.iloc[i]['element']
                         file_name = crm_df.iloc[i]['file_name']
+                        folder_name = crm_df.iloc[i]['folder_name']
                         solution_label = crm_df.iloc[i]['solution_label']
+                        blank_value = crm_df.iloc[i].get('blank_value')
+                        original_value = crm_df.iloc[i].get('original_value', value)
+
+                        blank_info = ""
+                        if not self.filtered_blank_df_cache.empty:
+                            relevant_blanks = self.filtered_blank_df_cache[
+                                (self.filtered_blank_df_cache['file_name'] == file_name) &
+                                (self.filtered_blank_df_cache['folder_name'] == folder_name) &
+                                (self.filtered_blank_df_cache['element'] == element)
+                            ]
+                            if not relevant_blanks.empty:
+                                blank_info = "\nBLANK Data:\n"
+                                for _, blank_row in relevant_blanks.iterrows():
+                                    blank_info += f"  - Solution Label: {blank_row['solution_label']}, Value: {blank_row['value']:.2f}\n"
+
                         closest_info = (
                             f"Element: {element}\n"
                             f"File: {file_name}\n"
                             f"Date: {date}\n"
                             f"Solution Label: {solution_label}\n"
-                            f"Value: {value:.2f}"
+                            f"Value: {value:.2f}\n"
+                            f"Original Value: {original_value:.2f}\n" if blank_value is not None else f"Value: {value:.2f}\n"
+                            f"Blank Value Applied: {blank_value:.2f}\n" if blank_value is not None else ""
+                            f"{blank_info}"
                         )
 
             if closest_info:
@@ -676,29 +851,47 @@ class CRMDataVisualizer(QMainWindow):
                 logging.debug("No point found near click position")
 
     def on_mouse_moved(self, pos):
-        """Show tooltip on mouse hover."""
+        """Show tooltip on mouse hover, including BLANK info."""
         pos = self.plot_widget.getViewBox().mapSceneToView(pos)
         x, y = pos.x(), pos.y()
-        # logging.debug(f"Mouse moved to view coordinates: x={x:.2f}, y={y:.2f}")
         closest_dist = float('inf')
         closest_info = None
 
         for plot_item, crm_df, indices, date_labels in self.plot_data_items:
             for i, (idx, value, date) in enumerate(zip(indices, crm_df['value'], date_labels)):
                 dist = ((idx - x) ** 2 + (value - y) ** 2) ** 0.5
-                if dist < 1:  # Increased threshold
+                if dist < 1:
                     closest_dist = dist
                     file_name = crm_df.iloc[i]['file_name']
+                    folder_name = crm_df.iloc[i]['folder_name']
                     crm_id = crm_df.iloc[i]['norm_crm_id']
                     element = crm_df.iloc[i]['element']
                     solution_label = crm_df.iloc[i]['solution_label']
+                    blank_value = crm_df.iloc[i].get('blank_value')
+                    original_value = crm_df.iloc[i].get('original_value', value)
+
+                    blank_info = ""
+                    if not self.filtered_blank_df_cache.empty:
+                        relevant_blanks = self.filtered_blank_df_cache[
+                            (self.filtered_blank_df_cache['file_name'] == file_name) &
+                            (self.filtered_blank_df_cache['folder_name'] == folder_name) &
+                            (self.filtered_blank_df_cache['element'] == element)
+                        ]
+                        if not relevant_blanks.empty:
+                            blank_info = "\nBLANK Data:\n"
+                            for _, blank_row in relevant_blanks.iterrows():
+                                blank_info += f"  - {blank_row['solution_label']}: {blank_row['value']:.2f}\n"
+
                     closest_info = (
                         f"CRM ID: {crm_id}\n"
                         f"Element: {element}\n"
                         f"Date: {date}\n"
                         f"Value: {value:.2f}\n"
+                        f"Original Value: {original_value:.2f}\n" if blank_value is not None else f"Value: {value:.2f}\n"
+                        f"Blank Value Applied: {blank_value:.2f}\n" if blank_value is not None else ""
                         f"Solution Label: {solution_label}\n"
-                        f"File: {file_name}"
+                        f"File: {file_name}\n"
+                        f"{blank_info}"
                     )
 
         if closest_info:
@@ -706,10 +899,8 @@ class CRMDataVisualizer(QMainWindow):
             self.tooltip_label.adjustSize()
             self.tooltip_label.move(int(pos.x() * 10 + 10), int(pos.y() * 10 + 10))
             self.tooltip_label.setVisible(True)
-            # logging.debug(f"Tooltip displayed: {closest_info}")
         else:
             self.tooltip_label.setVisible(False)
-            logging.debug("No point found for tooltip")
 
     def save_plot(self):
         """Save plot as PNG with logo."""
@@ -749,50 +940,59 @@ class CRMDataVisualizer(QMainWindow):
         self.to_date_edit.clear()
         self.percentage_edit.setText("10")
         self.best_wl_check.setChecked(True)
+        self.apply_blank_check.setChecked(False)
         logging.debug("Filters reset")
         self.update_filters()
 
     def apply_styles(self):
-        """Apply stylesheet to GUI."""
+        """Apply minimal custom styles, leveraging qfluentwidgets' built-in Fluent styling."""
         self.setStyleSheet("""
-            QMainWindow { background-color: #F5F6F5; }
-            QComboBox, QPushButton, QLineEdit, QCheckBox {
-                font-size: 13px; color: #2E2E2E; background-color: #FFFFFF;
-                border: 1px solid #D0D0D0; padding: 6px; border-radius: 4px; margin: 2px;
+            QMainWindow {
+                background-color: #F5F6FA;
+                font-family: 'Segoe UI', Arial, sans-serif;
             }
-            QComboBox { min-width: 120px; }
-            QComboBox::drop-down { border: none; width: 20px; }
-            QComboBox::down-arrow { image: url(:/icons/down-arrow.png); }
-            QPushButton { min-width: 100px; padding: 8px; }
-            QPushButton:hover { background-color: #E8ECEF; }
-            QLineEdit { min-width: 80px; }
             QTableWidget {
-                background-color: #FFFFFF; color: #2E2E2E; border: 1px solid #D0D0D0;
-                gridline-color: #E0E0E0; border-radius: 4px;
+                background-color: #FFFFFF;
+                border: 1px solid #E0E0E0;
+                border-radius: 8px;
+                gridline-color: #E0E0E0;
             }
-            QTableWidget::item { padding: 6px; }
+            QTableWidget::item {
+                padding: 8px;
+            }
             QHeaderView::section {
-                background-color: #E8ECEF; color: #2E2E2E; border: 1px solid #D0D0D0;
-                padding: 6px; font-weight: bold;
+                background-color: #0078D4;
+                color: #FFFFFF;
+                border: 1px solid #E0E0E0;
+                padding: 8px;
+                font-weight: bold;
+                font-size: 14px;
             }
             QProgressBar {
-                border: 1px solid #D0D0D0; border-radius: 4px; text-align: center;
-                color: #2E2E2E; background-color: #FFFFFF;
+                border: 1px solid #E0E0E0;
+                border-radius: 4px;
+                text-align: center;
+                background-color: #FFFFFF;
+                color: #000000;
             }
-            QProgressBar::chunk { background-color: #4CAF50; border-radius: 3px; }
-            QMenuBar { background-color: #F5F6F5; color: #2E2E2E; font-size: 13px; }
-            QMenuBar::item { padding: 6px 12px; background: transparent; }
-            QMenuBar::item:selected { background: #E8ECEF; }
-            QMenu { background-color: #FFFFFF; border: 1px solid #D0D0D0; border-radius: 4px; }
-            QMenu::item { padding: 6px 12px; color: #2E2E2E; }
-            QMenu::item:selected { background-color: #E8ECEF; }
+            QProgressBar::chunk {
+                background-color: #0078D4;
+                border-radius: 4px;
+            }
+            QLabel {
+                color: #000000;
+                font-size: 14px;
+                font-family: 'Segoe UI';
+            }
         """)
-        self.plot_widget.setBackground('#F5F6F5')
-        self.plot_widget.getAxis('bottom').setPen('#2E2E2E')
-        self.plot_widget.getAxis('left').setPen('#2E2E2E')
+        self.plot_widget.setBackground('#FFFFFF')
+        self.plot_widget.getAxis('bottom').setPen('#000000')
+        self.plot_widget.getAxis('left').setPen('#000000')
+        self.plot_widget.getAxis('bottom').setTextPen('#000000')
+        self.plot_widget.getAxis('left').setTextPen('#000000')
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = CRMDataVisualizer()
     window.show()
-    sys.exit(app.exec())
+    sys.exit(app.exec_())

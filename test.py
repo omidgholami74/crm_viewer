@@ -102,21 +102,21 @@ def load_excel(file_path):
                         total_rows = len(reader)
                         logger.debug(f"Total rows in CSV {file_path.name}: {total_rows}")
                         for idx, row in enumerate(reader):
-                            logger.debug(f"Processing row {idx}: {row}")
+                            # logger.debug(f"Processing row {idx}: {row}")
                             if idx == total_rows - 1:
                                 logger.debug(f"Skipping last row {idx} in {file_path.name}")
                                 continue
                             if not row or all(cell.strip() == "" for cell in row):
-                                logger.debug(f"Skipping empty row {idx} in {file_path.name}")
+                                # logger.debug(f"Skipping empty row {idx} in {file_path.name}")
                                 continue
                             
                             if len(row) > 0 and row[0].startswith("Sample ID:"):
                                 current_sample = row[1].strip() if len(row) > 1 else "Unknown_Sample"
-                                logger.debug(f"Set current_sample to {current_sample} at row {idx}")
+                                # logger.debug(f"Set current_sample to {current_sample} at row {idx}")
                                 continue
                             
                             if len(row) > 0 and (row[0].startswith("Method File:") or row[0].startswith("Calibration File:")):
-                                logger.debug(f"Skipping metadata row {idx}: {row[0]}")
+                                # logger.debug(f"Skipping metadata row {idx}: {row[0]}")
                                 continue
                             
                             if current_sample is None:
@@ -189,7 +189,7 @@ def load_excel(file_path):
                                 else:
                                     logger.warning(f"Skipping row {index} in {file_path.name}: Non-numeric values - Int={row[1] if pd.notna(row[1]) else 'N/A'}, Corr Con={row[5] if pd.notna(row[5]) else 'N/A'}")
                             except Exception as e:
-                                logger.error(f"Error processing row {index} in {file_path.name}: {str(e)}")
+                                # logger.error(f"Error processing row {index} in {file_path.name}: {str(e)}")
                                 continue
                 except Exception as e:
                     logger.error(f"Failed to process Excel {file_path.name}: {str(e)}")
@@ -292,15 +292,18 @@ def is_valid_crm_id(crm_id):
     pattern = r'^(?:\s*CRM\s*)?(\d{3}(?:\s*[a-zA-Z])?)$'
     match = re.match(pattern, str(crm_id).strip(), re.IGNORECASE)
     is_valid = bool(match)
-    logger.debug(f"Checking CRM ID: {crm_id}, Valid: {is_valid}")
+    # logger.debug(f"Checking CRM ID: {crm_id}, Valid: {is_valid}")
     return is_valid, match.group(1) if match else None
 
 # Main function to process folders and extract CRM data
 def process_folders(folder_paths, db_path, crm_ids):
     try:
         conn = init_db(db_path)
-        # Regex to match valid CRM IDs
+        cursor = conn.cursor()
+        # Regex for CRM IDs
         crm_pattern = re.compile(r'^(?:\s*CRM\s*)?(\d{3}(?:\s*[a-zA-Z])?)$', re.IGNORECASE)
+        # Regex for BLANK entries
+        blank_pattern = re.compile(r'(?:CRM\s*)?(?:BLANK|BLNK)(?:S|s)?(?:\s+.*)?', re.IGNORECASE)
         logger.info(f"Starting to process folders: {folder_paths}")
 
         for folder in folder_paths:
@@ -342,8 +345,25 @@ def process_folders(folder_paths, db_path, crm_ids):
                         logger.warning(f"Skipping file with invalid name format: {file_path.name}")
                         continue
 
-                    # Get the relative path of the folder containing the file
-                    folder_name = str(file_path.parent.relative_to(Path.cwd()))
+                    # Get the middle part of the folder path
+                    folder_parts = file_path.parent.parts
+                    if len(folder_parts) >= 3:
+                        folder_name = folder_parts[-2]  # Take the second-to-last part (e.g., 'mass' from 'New folder/mass/1 -2')
+                    else:
+                        folder_name = str(file_path.parent.relative_to(Path.cwd()))  # Fallback to relative path
+                        logger.warning(f"Folder path {file_path.parent} has fewer than 3 parts, using relative path: {folder_name}")
+
+                    # Check if file already exists in the database
+                    cursor.execute('''
+                        SELECT COUNT(*) FROM crm_data
+                        WHERE file_name = ? AND folder_name = ?
+                    ''', (file_path.name, folder_name))
+                    file_count = cursor.fetchone()[0]
+                    
+                    if file_count > 0:
+                        logger.info(f"Skipping file {file_path.name} in folder {folder_name} as it already exists in the database")
+                        continue
+
                     date = extract_date(file_path.name)
                     logger.debug(f"Processing {file_path.name}, folder: {folder_name}, date: {date}")
 
@@ -352,34 +372,53 @@ def process_folders(folder_paths, db_path, crm_ids):
                         logger.warning(f"No data loaded from {file_path}")
                         continue
 
-                    # Filter for Sample type
-                    df_filtered = df[df['Type'].isin(['Samp', 'Sample'])].copy()
+                    # Filter for Sample and Blk types (include both CRM and BLANK)
+                    df_filtered = df[df['Type'].isin(['Samp', 'Sample', 'Blk'])].copy()
                     if df_filtered.empty:
-                        logger.warning(f"No Sample data in {file_path}")
+                        logger.warning(f"No Sample or Blk data in {file_path}")
                         continue
-                    logger.debug(f"Filtered {len(df_filtered)} Sample rows from {file_path}")
+                    logger.debug(f"Filtered {len(df_filtered)} Sample/Blk rows from {file_path}")
 
                     for _, row in df_filtered.iterrows():
                         solution_label = row['Solution Label']
-                        match = crm_pattern.search(str(solution_label))
-                        if match:
-                            crm_id = match.group(1)
+                        # Check for BLANK first
+                        blank_match = blank_pattern.search(str(solution_label))
+                        if blank_match:
+                            crm_id = "BLANK"  # Use "BLANK" as the identifier for BLANK samples
+                            element = row['Element']
+                            value = row['Corr Con']
+                            if pd.notna(value):
+                                cursor.execute('''
+                                    INSERT INTO crm_data (crm_id, solution_label, element, value, file_name, folder_name, date)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                                ''', (crm_id, solution_label, element, float(value), file_path.name, folder_name, date))
+                                conn.commit()
+                                logger.debug(f"Inserted BLANK: CRM ID={crm_id}, Solution Label={solution_label}, Element={element}, Value={value}, File={file_path.name}, Folder={folder_name}")
+                            else:
+                                logger.debug(f"Skipping BLANK with invalid value in {file_path.name}: Solution Label={solution_label}")
+                            continue  # Skip to next row after processing BLANK
+                        
+                        # Check for CRM ID
+                        crm_match = crm_pattern.search(str(solution_label))
+                        if crm_match:
+                            crm_id = crm_match.group(1)
                             is_valid, valid_crm_id = is_valid_crm_id(crm_id)
                             if is_valid:
                                 element = row['Element']
                                 value = row['Corr Con']
                                 if pd.notna(value):
-                                    cursor = conn.cursor()
                                     cursor.execute('''
                                         INSERT INTO crm_data (crm_id, solution_label, element, value, file_name, folder_name, date)
                                         VALUES (?, ?, ?, ?, ?, ?, ?)
                                     ''', (valid_crm_id, solution_label, element, float(value), file_path.name, folder_name, date))
                                     conn.commit()
-                                    logger.debug(f"Inserted: CRM ID={valid_crm_id}, Solution Label={solution_label}, Element={element}, Value={value}, File={file_path.name}")
+                                    logger.debug(f"Inserted CRM: CRM ID={valid_crm_id}, Solution Label={solution_label}, Element={element}, Value={value}, File={file_path.name}, Folder={folder_name}")
+                                else:
+                                    logger.debug(f"Skipping CRM with invalid value in {file_path.name}: Solution Label={solution_label}")
                             else:
                                 logger.debug(f"Skipping invalid CRM ID: {crm_id} in {file_path.name}")
                         else:
-                            logger.debug(f"No valid CRM ID found in Solution Label: {solution_label} in {file_path.name}")
+                            logger.debug(f"No valid CRM or BLANK ID found in Solution Label: {solution_label} in {file_path.name}")
                 except Exception as e:
                     logger.error(f"Error processing {file_path}: {str(e)}")
                     continue
@@ -391,13 +430,14 @@ def process_folders(folder_paths, db_path, crm_ids):
         logger.error(f"Error in process_folders: {str(e)}")
         if 'conn' in locals():
             conn.close()
-
 # Example usage
 if __name__ == "__main__":
     # Replace with your actual folder paths
     folder_paths = [
-        "New folder/1404 mass"
+        "New folder//mass",
+        "New folder//oes 4ac",
+        "New folder//oes fire"
     ]
-    db_path = "crm_mass.db"
+    db_path = "crm_blank.db"
     crm_ids = ['258', '252', '906', '506', '233', '255', '263', '260']
     process_folders(folder_paths, db_path, crm_ids)
