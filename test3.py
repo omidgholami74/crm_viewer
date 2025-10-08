@@ -19,6 +19,8 @@ from persiantools.jdatetime import JalaliDate
 import numpy as np
 from pathlib import Path
 from PIL import Image
+import csv
+import shutil
 
 # Setup logging
 log_file = Path("crm_visualizer.log").resolve()
@@ -56,6 +58,147 @@ def validate_percentage(text):
     except (ValueError, TypeError):
         return False
 
+def split_element_name(element):
+    """Split element name like 'Ce140' into 'Ce 140'."""
+    if not isinstance(element, str):
+        return element
+    match = re.match(r'^([A-Za-z]+)(\d+\.?\d*)$', element.strip())
+    if match:
+        symbol, number = match.groups()
+        return f"{symbol} {number}"
+    return element
+
+def extract_date(file_name):
+    """Extract date from file_name like '1404-01-01' or '1404-01-1'."""
+    try:
+        match = re.match(r'(\d{4}-\d{2}-\d{1,2})', file_name)
+        if match:
+            date_str = match.group(1)
+            year, month, day = map(int, date_str.split('-'))
+            date_str = f"{year:04d}-{month:02d}-{day:02d}"
+            year, month, day = map(int, date_str.split('-'))
+            # logger.debug(f"Extracted and normalized date from {file_name}: {date_str}")
+            return JalaliDate(year, month, day).strftime("%Y/%m/%d")
+        logger.warning(f"No valid date found in filename: {file_name}")
+        return None
+    except Exception as e:
+        logger.error(f"Error extracting date from {file_name}: {str(e)}")
+        return None
+
+def is_numeric(value):
+    """Check if a value can be converted to float."""
+    if value is None or str(value).strip() == "":
+        return False
+    try:
+        float(value)
+        return True
+    except ValueError:
+        return False
+
+def load_raw_file(file_path, db_path):
+    """Load and parse raw CSV/.rep file into a DataFrame with required columns."""
+    file_path = Path(file_path)
+    logger.info(f"Processing raw file: {file_path}")
+    try:
+        # Determine file format (new or old)
+        is_new_format = False
+        with open(file_path, 'r', encoding='utf-8') as f:
+            preview_lines = [f.readline().strip() for _ in range(10)]
+            logger.debug(f"CSV preview (first 10 lines) for {file_path.name}:\n{preview_lines}")
+            is_new_format = any("Sample ID:" in line for line in preview_lines) or \
+                            any("Net Intensity" in line for line in preview_lines)
+        logger.info(f"File {file_path.name} detected as {'new' if is_new_format else 'old'} format")
+
+        data_rows = []
+        if is_new_format:
+            current_sample = None
+            with open(file_path, 'r', encoding='utf-8') as f:
+                reader = list(csv.reader(f, delimiter=',', quotechar='"'))
+                total_rows = len(reader)
+                logger.debug(f"Total rows in CSV {file_path.name}: {total_rows}")
+                for idx, row in enumerate(reader):
+                    if idx == total_rows - 1:
+                        logger.debug(f"Skipping last row {idx} in {file_path.name}")
+                        continue
+                    if not row or all(cell.strip() == "" for cell in row):
+                        continue
+                    
+                    if len(row) > 0 and row[0].startswith("Sample ID:"):
+                        current_sample = row[1].strip() if len(row) > 1 else "Unknown_Sample"
+                        continue
+                    
+                    if len(row) > 0 and (row[0].startswith("Method File:") or row[0].startswith("Calibration File:")):
+                        continue
+                    
+                    if current_sample is None:
+                        current_sample = "Unknown_Sample"
+                        logger.warning(f"No Sample ID found before row {idx}, using default: {current_sample}")
+                    
+                    element = split_element_name(row[0].strip())
+                    try:
+                        concentration = float(row[5]) if len(row) > 5 and is_numeric(row[5]) else None
+                        if concentration is not None:
+                            type_value = "BLANK" if "BLANK" in current_sample.upper() else current_sample
+                            data_rows.append({
+                                "crm_id": type_value,
+                                "solution_label": current_sample,
+                                "element": element,
+                                "value": concentration,
+                                "file_name": file_path.name,
+                                "folder_name": str(file_path.parent.name)
+                            })
+                        else:
+                            logger.warning(f"Skipping row {idx} in {file_path.name}: Non-numeric concentration - Corr Con={row[5] if len(row) > 5 else 'N/A'}")
+                    except Exception as e:
+                        logger.error(f"Error processing row {idx} in {file_path.name}: {str(e)}")
+                        continue
+        else:
+                temp_df = pd.read_csv(file_path, header=None, nrows=1, encoding='utf-8')
+                logger.debug(f"CSV header preview for {file_path.name}: {temp_df.to_string()}")
+                if temp_df.iloc[0].notna().sum() == 1:
+                    df = pd.read_csv(file_path, header=1, encoding='utf-8', on_bad_lines='skip')
+                else:
+                    df = pd.read_csv(file_path, header=0, encoding='utf-8', on_bad_lines='skip')
+                logger.debug(f"Loaded CSV {file_path.name} with {len(df)} rows")
+                
+                df = df.iloc[:-1]
+                logger.debug(f"Removed last row, remaining rows: {len(df)}")
+                
+                expected_columns = ["Solution Label", "Element", "Int", "Corr Con"]
+                column_mapping = {"Sample ID": "Solution Label"}
+                df.rename(columns=column_mapping, inplace=True)
+                
+                if not all(col in df.columns for col in expected_columns):
+                    missing_cols = set(expected_columns) - set(df.columns)
+                    logger.error(f"Required columns missing in {file_path.name}: {', '.join(missing_cols)}")
+                    raise ValueError(f"Required columns missing: {', '.join(missing_cols)}")
+                
+                df['Element'] = df['Element'].apply(split_element_name)
+                df['crm_id'] = df['Solution Label'].apply(lambda x: "BLANK" if "BLANK" in str(x).upper() else x)
+                df['value'] = pd.to_numeric(df['Corr Con'], errors='coerce')
+                df = df.dropna(subset=['value'])
+                df['file_name'] = file_path.name
+                df['folder_name'] = str(file_path.parent.name)
+                data_rows = df[['crm_id', 'Solution Label', 'Element', 'value', 'file_name', 'folder_name']].rename(
+                    columns={'Solution Label': 'solution_label', 'Element': 'element'}
+                ).to_dict('records')
+        
+        if not data_rows:
+            logger.error(f"No valid data found in {file_path.name}")
+            raise ValueError("No valid data found in the file")
+        
+        df = pd.DataFrame(data_rows)
+        # Do not assign 'id' column; let SQLite handle it
+        df = df[['crm_id', 'solution_label', 'element', 'value', 'file_name', 'folder_name']]
+        logger.debug(f"Final DataFrame columns: {df.columns.tolist()}")
+        logger.debug(f"Final DataFrame sample:\n{df.head().to_string()}")
+        logger.info(f"Successfully processed {file_path.name} with {len(df)} rows")
+        return df
+    
+    except Exception as e:
+        logger.error(f"Error loading {file_path}: {str(e)}")
+        raise
+
 class DataLoaderThread(QThread):
     data_loaded = pyqtSignal(pd.DataFrame, pd.DataFrame)
     error_occurred = pyqtSignal(str)
@@ -74,11 +217,11 @@ class DataLoaderThread(QThread):
             conn.close()
             self.progress_updated.emit(60)
 
-            df['date'] = df['file_name'].apply(self.extract_date)
+            df['date'] = df['file_name'].apply(extract_date)
             df = df.dropna(subset=['date'])
-            df['year'] = df['date'].apply(lambda x: x.year)
-            df['month'] = df['date'].apply(lambda x: x.month)
-            df['day'] = df['date'].apply(lambda x: x.day)
+            df['year'] = df['date'].apply(lambda x: int(x.split('/')[0]))
+            df['month'] = df['date'].apply(lambda x: int(x.split('/')[1]))
+            df['day'] = df['date'].apply(lambda x: int(x.split('/')[2]))
             self.progress_updated.emit(80)
 
             crm_df = df[df['crm_id'] != 'BLANK'].copy()
@@ -90,18 +233,6 @@ class DataLoaderThread(QThread):
         except Exception as e:
             logging.error(f"Data loading error: {str(e)}")
             self.error_occurred.emit(f"Failed to load data: {str(e)}")
-
-    def extract_date(self, file_name):
-        """Extract Jalali date from file name (e.g., '1404-01-01')."""
-        try:
-            match = re.match(r'(\d{4}-\d{2}-\d{2})', file_name)
-            if match:
-                date_str = match.group(1)
-                year, month, day = map(int, date_str.split('-'))
-                return JalaliDate(year, month, day)
-            return None
-        except Exception:
-            return None
 
 class ImportFileThread(QThread):
     import_completed = pyqtSignal(pd.DataFrame)
@@ -116,22 +247,31 @@ class ImportFileThread(QThread):
     def run(self):
         try:
             self.progress_updated.emit(20)
-            ext = Path(self.file_path).suffix.lower()
-            if ext not in ['.csv', '.rep']:
-                raise ValueError("Unsupported file format. Only CSV and .rep are allowed.")
-            
-            df = pd.read_csv(self.file_path)
-            self.progress_updated.emit(50)
-            
-            required_columns = ['id', 'crm_id', 'solution_label', 'element', 'value', 'file_name', 'folder_name']
-            if not all(col in df.columns for col in required_columns):
-                raise ValueError(f"CSV/.rep file must contain columns: {required_columns}")
+            file_path = Path(self.file_path)
+            ext = file_path.suffix.lower()
 
+            # Handle .rep files by copying to .csv
+            if ext == '.rep':
+                csv_path = file_path.with_suffix('.csv')
+                if not csv_path.exists():
+                    shutil.copy(file_path, csv_path)
+                    logging.debug(f"Converted {file_path} to {csv_path}")
+                file_path = csv_path
+                ext = '.csv'
+
+            if ext != '.csv':
+                raise ValueError("Unsupported file format. Only CSV and .rep are allowed.")
+
+            # Parse raw file
+            df = load_raw_file(file_path, self.db_path)
+            self.progress_updated.emit(50)
+
+            # Connect to database and insert data
             conn = sqlite3.connect(self.db_path)
             df.to_sql('crm_data', conn, if_exists='append', index=False)
             conn.close()
             self.progress_updated.emit(100)
-            logging.info(f"Imported {len(df)} records from {self.file_path} to {self.db_path}")
+            logging.info(f"Imported {len(df)} records from {file_path} to {self.db_path}")
             self.import_completed.emit(df)
         except Exception as e:
             logging.error(f"Import error: {str(e)}")
@@ -168,11 +308,11 @@ class FilterThread(QThread):
             filtered_crm_df = filtered_crm_df[filtered_crm_df['norm_crm_id'] == self.filters['crm']]
         
         if self.filters['from_date']:
-            filtered_crm_df = filtered_crm_df[filtered_crm_df['date'] >= self.filters['from_date']]
-            filtered_blank_df = filtered_blank_df[filtered_blank_df['date'] >= self.filters['from_date']]
+            filtered_crm_df = filtered_crm_df[filtered_crm_df['date'] >= self.filters['from_date'].strftime("%Y/%m/%d")]
+            filtered_blank_df = filtered_blank_df[filtered_blank_df['date'] >= self.filters['from_date'].strftime("%Y/%m/%d")]
         if self.filters['to_date']:
-            filtered_crm_df = filtered_crm_df[filtered_crm_df['date'] <= self.filters['to_date']]
-            filtered_blank_df = filtered_blank_df[filtered_blank_df['date'] <= self.filters['to_date']]
+            filtered_crm_df = filtered_crm_df[filtered_crm_df['date'] <= self.filters['to_date'].strftime("%Y/%m/%d")]
+            filtered_blank_df = filtered_blank_df[filtered_blank_df['date'] <= self.filters['to_date'].strftime("%Y/%m/%d")]
         
         self.progress_updated.emit(100)
         logging.debug(f"Filtered {len(filtered_crm_df)} CRM records and {len(filtered_blank_df)} BLANK records")
@@ -181,7 +321,7 @@ class FilterThread(QThread):
 class CRMDataVisualizer(QMainWindow):
     def __init__(self):
         super().__init__()
-        setTheme(Theme.LIGHT)  # Set Fluent light theme
+        setTheme(Theme.LIGHT)
         self.setWindowTitle("CRM Data Visualizer")
         self.setGeometry(100, 100, 1400, 900)
 
@@ -205,7 +345,7 @@ class CRMDataVisualizer(QMainWindow):
         self.main_layout.setSpacing(16)
         self.main_layout.setContentsMargins(20, 20, 20, 20)
 
-        # Button section (boxed with CardWidget)
+        # Button section
         self.button_card = CardWidget()
         self.button_card.setStyleSheet("""
             CardWidget {
@@ -236,7 +376,7 @@ class CRMDataVisualizer(QMainWindow):
         self.filter_logo_layout = QHBoxLayout()
         self.filter_logo_layout.setSpacing(16)
 
-        # Filter section (boxed with CardWidget)
+        # Filter section
         self.filter_card = CardWidget()
         self.filter_card.setStyleSheet("""
             CardWidget {
@@ -250,7 +390,6 @@ class CRMDataVisualizer(QMainWindow):
         self.filter_layout.setSpacing(12)
         self.filter_layout.setContentsMargins(15, 15, 15, 15)
 
-        # Title for filter card
         self.filter_title = TitleLabel("Filter Controls")
         self.filter_title.setStyleSheet("""
             TitleLabel {
@@ -262,7 +401,6 @@ class CRMDataVisualizer(QMainWindow):
         """)
         self.filter_layout.addWidget(self.filter_title)
 
-        # Controls in one row (except checkboxes)
         self.controls_layout = QHBoxLayout()
         self.controls_layout.setSpacing(12)
         self.device_label = QLabel("Device:")
@@ -299,7 +437,6 @@ class CRMDataVisualizer(QMainWindow):
         self.controls_layout.addStretch()
         self.filter_layout.addLayout(self.controls_layout)
 
-        # Checkboxes in one column
         self.checkbox_layout = QVBoxLayout()
         self.checkbox_layout.setSpacing(8)
         self.best_wl_check = CheckBox("Select Best Wavelength")
@@ -311,7 +448,6 @@ class CRMDataVisualizer(QMainWindow):
         self.checkbox_layout.addStretch()
         self.filter_layout.addLayout(self.checkbox_layout)
 
-        # Tooltips
         self.device_combo.setToolTip("Select a device to filter data")
         self.element_combo.setToolTip("Select an element to plot")
         self.crm_combo.setToolTip("Select a CRM ID to filter")
@@ -321,15 +457,12 @@ class CRMDataVisualizer(QMainWindow):
         self.best_wl_check.setToolTip("Select the best wavelength based on verification value")
         self.apply_blank_check.setToolTip("Subtract the best BLANK value from CRM data")
 
-        # Populate combo boxes
         self.device_combo.addItem("All Devices")
         self.element_combo.addItem("All Elements")
         self.crm_combo.addItem("All CRM IDs")
 
-        # Set layout to filter card
         self.filter_card.setLayout(self.filter_layout)
 
-        # Logo section (boxed with CardWidget)
         self.logo_card = CardWidget()
         self.logo_card.setStyleSheet("""
             CardWidget {
@@ -347,18 +480,15 @@ class CRMDataVisualizer(QMainWindow):
         self.logo_card.setLayout(self.logo_layout)
         self.logo_card.setFixedWidth(120)
 
-        # Add filter and logo to layout
         self.filter_logo_layout.addWidget(self.filter_card, stretch=1)
         self.filter_logo_layout.addWidget(self.logo_card)
         self.main_layout.addLayout(self.filter_logo_layout)
 
-        # Progress bar
         self.progress_bar = QProgressBar()
         self.progress_bar.setMaximum(100)
         self.progress_bar.setVisible(False)
         self.main_layout.addWidget(self.progress_bar)
 
-        # Plot widget
         self.plot_widget = PlotWidget()
         self.plot_widget.setTitle("CRM Data Plot", color='#000000', size='14pt')
         self.plot_widget.setLabel('left', 'Value', color='#000000')
@@ -366,7 +496,6 @@ class CRMDataVisualizer(QMainWindow):
         self.plot_widget.addLegend(offset=(10, 10))
         self.main_layout.addWidget(self.plot_widget, stretch=2)
 
-        # Tooltip label
         self.tooltip_label = QLabel("", self.plot_widget)
         self.tooltip_label.setStyleSheet("""
             background-color: #FFFFFF;
@@ -380,18 +509,15 @@ class CRMDataVisualizer(QMainWindow):
         self.tooltip_label.setVisible(False)
         self.tooltip_label.setFont(QFont("Segoe UI", 10))
 
-        # Table widget
         self.table_widget = QTableWidget()
         self.table_widget.setColumnCount(8)
         self.table_widget.setHorizontalHeaderLabels(["ID", "CRM ID", "Solution Label", "Element", "Value", "File Name", "Folder Name", "Date"])
         self.table_widget.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.main_layout.addWidget(self.table_widget, stretch=1)
 
-        # Status label
         self.status_label = QLabel("Loading data...")
         self.main_layout.addWidget(self.status_label)
 
-        # Connect signals
         self.device_combo.currentTextChanged.connect(self.on_filter_changed)
         self.element_combo.currentTextChanged.connect(self.on_filter_changed)
         self.crm_combo.currentTextChanged.connect(self.on_filter_changed)
@@ -408,20 +534,16 @@ class CRMDataVisualizer(QMainWindow):
         self.plot_widget.scene().sigMouseClicked.connect(self.on_mouse_clicked)
         self.plot_widget.scene().sigMouseMoved.connect(self.on_mouse_moved)
 
-        # Apply styles and load logo
         self.apply_styles()
         self.load_default_logo()
 
-        # Start data loading
         logging.debug("Initializing CRMDataVisualizer")
         self.load_data_thread()
 
     def get_db_path(self, name):
-        """Get absolute path for database file."""
         return Path(__file__).parent / name
 
     def load_default_logo(self):
-        """Load logo image if exists."""
         if self.logo_path.exists():
             pixmap = QPixmap(str(self.logo_path))
             self.logo_label.setPixmap(pixmap.scaled(100, 50, Qt.KeepAspectRatio))
@@ -430,7 +552,6 @@ class CRMDataVisualizer(QMainWindow):
             logging.warning(f"Default logo not found at: {self.logo_path}")
 
     def load_data_thread(self):
-        """Start thread to load data from database."""
         self.progress_bar.setVisible(True)
         self.loader_thread = DataLoaderThread(self.crm_db_path)
         self.loader_thread.data_loaded.connect(self.on_data_loaded)
@@ -440,7 +561,6 @@ class CRMDataVisualizer(QMainWindow):
         self.loader_thread.start()
 
     def import_file(self):
-        """Open file dialog to import CSV or REP file."""
         fname, _ = QFileDialog.getOpenFileName(self, "Import File", "", "CSV or REP Files (*.csv *.rep)")
         if fname:
             self.progress_bar.setVisible(True)
@@ -452,13 +572,11 @@ class CRMDataVisualizer(QMainWindow):
             self.import_thread.start()
 
     def on_import_completed(self, df):
-        """Handle completion of file import."""
         self.load_data_thread()
         self.status_label.setText(f"Imported {len(df)} records successfully")
         logging.info(f"Imported {len(df)} records successfully")
 
     def on_data_loaded(self, crm_df, blank_df):
-        """Process loaded data and populate filters."""
         allowed_crms = ['258', '252', '906', '506', '233', '255', '263', '269']
         crm_df = crm_df[crm_df['norm_crm_id'].isin(allowed_crms)].dropna(subset=['norm_crm_id'])
         self.crm_df = crm_df
@@ -468,7 +586,6 @@ class CRMDataVisualizer(QMainWindow):
         self.status_label.setText("Data loaded successfully")
 
     def on_data_error(self, error_message):
-        """Handle data loading errors."""
         self.crm_df = pd.DataFrame()
         self.blank_df = pd.DataFrame()
         self.status_label.setText(error_message)
@@ -477,34 +594,26 @@ class CRMDataVisualizer(QMainWindow):
         self.populate_filters()
 
     def on_filter_changed(self):
-        """Trigger filter update when filter inputs change."""
         if self.updating_filters:
             return
         logging.debug("Filter changed, updating filters")
         self.update_filters()
 
     def is_valid_crm_id(self, crm_id):
-        """Check if CRM ID is in allowed list."""
         norm = normalize_crm_id(crm_id)
         allowed = ['258', '252', '906', '506', '233', '255', '263', '269']
         return norm in allowed
 
     def extract_device_name(self, folder_name):
-        """Extract device name, allowing only 'mass', 'oes 4ac', or 'oes fire'."""
         if not folder_name or not isinstance(folder_name, str):
-            # logging.warning(f"Invalid or empty folder_name: {folder_name}")
             return None
         allowed_devices = {'mass', 'oes 4ac', 'oes fire'}
-        # Normalize folder_name to lowercase for case-insensitive comparison
         normalized_name = folder_name.strip().lower()
         if normalized_name in allowed_devices:
-            # logging.debug(f"Valid device found: {normalized_name}")
             return normalized_name
-        # logging.warning(f"folder_name '{folder_name}' is not an allowed device, skipping")
         return None
 
     def populate_filters(self):
-        """Populate filter dropdowns with hardcoded device names and other unique values."""
         if self.crm_df.empty:
             logging.warning("No CRM data available to populate filters")
             return
@@ -517,16 +626,11 @@ class CRMDataVisualizer(QMainWindow):
         self.element_combo.clear()
         self.crm_combo.clear()
 
-        # Hardcode allowed device names
         self.device_combo.addItem("All Devices")
         self.device_combo.addItems(['mass', 'oes 4ac', 'oes fire'])
 
         elements = sorted(set(el.split()[0] for el in self.crm_df['element'].unique() if isinstance(el, str)))
         crms = sorted(self.crm_df['norm_crm_id'].unique())
-
-        # logging.debug(f"Devices hardcoded: ['mass', 'oes 4ac', 'oes fire']")
-        # logging.debug(f"Elements: {elements}")
-        # logging.debug(f"Valid CRM IDs: {crms}")
 
         self.element_combo.addItem("All Elements")
         self.element_combo.addItems(elements)
@@ -540,7 +644,6 @@ class CRMDataVisualizer(QMainWindow):
         self.update_filters()
 
     def update_filters(self):
-        """Apply filters to data and start filter thread."""
         if self.updating_filters:
             return
         self.updating_filters = True
@@ -583,7 +686,6 @@ class CRMDataVisualizer(QMainWindow):
             self.updating_filters = False
 
     def on_filtered_data(self, filtered_crm_df, filtered_blank_df):
-        """Update table and cache filtered data."""
         self.filtered_crm_df_cache = filtered_crm_df
         self.filtered_blank_df_cache = filtered_blank_df
         QApplication.processEvents()
@@ -592,7 +694,6 @@ class CRMDataVisualizer(QMainWindow):
         logging.info(f"Filtered {len(filtered_crm_df)} CRM records and {len(filtered_blank_df)} BLANK records")
 
     def update_table(self, df):
-        """Populate table with filtered data."""
         self.table_widget.setRowCount(len(df))
         for i, row in df.iterrows():
             QApplication.processEvents()
@@ -603,10 +704,9 @@ class CRMDataVisualizer(QMainWindow):
             self.table_widget.setItem(i, 4, QTableWidgetItem(str(row['value'])))
             self.table_widget.setItem(i, 5, QTableWidgetItem(row['file_name']))
             self.table_widget.setItem(i, 6, QTableWidgetItem(row['folder_name']))
-            self.table_widget.setItem(i, 7, QTableWidgetItem(row['date'].strftime("%Y/%m/%d")))
+            self.table_widget.setItem(i, 7, QTableWidgetItem(row['date']))
 
     def export_table(self):
-        """Export table data to CSV."""
         if self.plot_df_cache is None or self.plot_df_cache.empty:
             QMessageBox.warning(self, "Warning", "No data to export")
             return
@@ -621,7 +721,6 @@ class CRMDataVisualizer(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Failed to export table: {str(e)}")
 
     def get_verification_value(self, crm_id, element):
-        """Retrieve verification value from reference database."""
         cache_key = f"{crm_id}_{element}"
         if cache_key in self.verification_cache:
             logging.debug(f"Retrieved verification value from cache for {cache_key}: {self.verification_cache[cache_key]}")
@@ -696,13 +795,12 @@ class CRMDataVisualizer(QMainWindow):
                 conn.close()
 
     def select_best_blank(self, crm_row, blank_df, ver_value):
-        """Select the best BLANK that brings CRM value closest to verification value."""
         if blank_df.empty or ver_value is None:
             return None, crm_row['value']
         
         relevant_blanks = blank_df[
             (blank_df['file_name'] == crm_row['file_name']) &
-            (blank_df['folder_name'] == crm_row['folder_name']) &
+            (blank_df['folder_name'] == crm_row['file_name']) &
             (blank_df['element'] == crm_row['element'])
         ]
         
@@ -726,7 +824,6 @@ class CRMDataVisualizer(QMainWindow):
         return best_blank_value, corrected_value
 
     def plot_data(self):
-        """Plot filtered data with control lines and optional blank correction."""
         self.plot_widget.clear()
         self.plot_data_items = []
         filtered_crm_df = self.filtered_crm_df_cache if self.filtered_crm_df_cache is not None else self.crm_df
@@ -780,7 +877,7 @@ class CRMDataVisualizer(QMainWindow):
 
             indices = np.arange(len(crm_df))
             values = crm_df['value'].values
-            date_labels = [d.strftime("%Y/%m/%d") for d in crm_df['date']]
+            date_labels = [d for d in crm_df['date']]
             logging.debug(f"CRM {crm_id}: {len(indices)} points, values range: {min(values, default=0):.2f} - {max(values, default=0):.2f}")
 
             pen = mkPen(color=colors[idx % len(colors)], width=2)
@@ -796,7 +893,7 @@ class CRMDataVisualizer(QMainWindow):
                     self.plot_widget.plot(x_range, [ver_value * (1 - percentage / 100)] * 2, pen=mkPen('#FF6B6B', width=2, style=Qt.DotLine), name="LCL")
                     self.plot_widget.plot(x_range, [ver_value - 2 * delta] * 2, pen=mkPen('#4ECDC4', width=1, style=Qt.DotLine), name="-2LS")
                     self.plot_widget.plot(x_range, [ver_value - delta] * 2, pen=mkPen('#4ECDC4', width=1, style=Qt.DotLine), name="-1LS")
-                    self.plot_widget.plot(x_range, [ver_value] * 2, py=mkPen('#000000', width=3, style=Qt.DashLine), name=f"Ref Value ({ver_value:.3f})")
+                    self.plot_widget.plot(x_range, [ver_value] * 2, pen=mkPen('#000000', width=3, style=Qt.DashLine), name=f"Ref Value ({ver_value:.3f})")
                     self.plot_widget.plot(x_range, [ver_value + delta] * 2, pen=mkPen('#45B7D1', width=1, style=Qt.DotLine), name="1LS")
                     self.plot_widget.plot(x_range, [ver_value + 2 * delta] * 2, pen=mkPen('#45B7D1', width=1, style=Qt.DotLine), name="2LS")
                     self.plot_widget.plot(x_range, [ver_value * (1 + percentage / 100)] * 2, pen=mkPen('#FF6B6B', width=2, style=Qt.DotLine), name="UCL")
@@ -809,7 +906,6 @@ class CRMDataVisualizer(QMainWindow):
         logging.info(f"Plotted {len(self.plot_df_cache)} records")
 
     def on_mouse_clicked(self, event):
-        """Show point info on click, including BLANK data."""
         if event.button() == Qt.LeftButton:
             pos = self.plot_widget.getViewBox().mapSceneToView(event.scenePos())
             x, y = pos.x(), pos.y()
@@ -860,7 +956,6 @@ class CRMDataVisualizer(QMainWindow):
                 logging.debug("No point found near click position")
 
     def on_mouse_moved(self, pos):
-        """Show tooltip on mouse hover, including BLANK info."""
         pos = self.plot_widget.getViewBox().mapSceneToView(pos)
         x, y = pos.x(), pos.y()
         closest_dist = float('inf')
@@ -912,7 +1007,6 @@ class CRMDataVisualizer(QMainWindow):
             self.tooltip_label.setVisible(False)
 
     def save_plot(self):
-        """Save plot as PNG with logo."""
         try:
             import pyqtgraph.exporters
             temp_file = 'temp_crm_plot.png'
@@ -939,7 +1033,6 @@ class CRMDataVisualizer(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to save plot: {str(e)}")
 
     def reset_filters(self):
-        """Reset all filter inputs."""
         if self.updating_filters:
             return
         self.device_combo.setCurrentText("All Devices")
@@ -954,7 +1047,6 @@ class CRMDataVisualizer(QMainWindow):
         self.update_filters()
 
     def apply_styles(self):
-        """Apply minimal custom styles, leveraging qfluentwidgets' built-in Fluent styling."""
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #F5F6FA;
