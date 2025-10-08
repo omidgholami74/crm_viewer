@@ -100,7 +100,6 @@ def load_raw_file(file_path, db_path):
     file_path = Path(file_path)
     logger.info(f"Processing raw file: {file_path}")
     try:
-        # Determine file format (new or old)
         is_new_format = False
         with open(file_path, 'r', encoding='utf-8') as f:
             preview_lines = [f.readline().strip() for _ in range(10)]
@@ -250,7 +249,6 @@ class ImportFileThread(QThread):
             file_path = Path(self.file_path)
             ext = file_path.suffix.lower()
 
-            # Handle .rep files by copying to .csv
             if ext == '.rep':
                 csv_path = file_path.with_suffix('.csv')
                 if not csv_path.exists():
@@ -262,11 +260,9 @@ class ImportFileThread(QThread):
             if ext != '.csv':
                 raise ValueError("Unsupported file format. Only CSV and .rep are allowed.")
 
-            # Parse raw file
             df = load_raw_file(file_path, self.db_path)
             self.progress_updated.emit(50)
 
-            # Connect to database and insert data
             conn = sqlite3.connect(self.db_path)
             df.to_sql('crm_data', conn, if_exists='append', index=False)
             conn.close()
@@ -325,7 +321,6 @@ class CRMDataVisualizer(QMainWindow):
         self.setWindowTitle("CRM Data Visualizer")
         self.setGeometry(100, 100, 1400, 900)
 
-        # Initialize data
         self.crm_df = pd.DataFrame()
         self.blank_df = pd.DataFrame()
         self.crm_db_path = self.get_db_path("crm_blank.db")
@@ -338,14 +333,12 @@ class CRMDataVisualizer(QMainWindow):
         self.plot_data_items = []
         self.logo_path = Path("logo.png")
 
-        # Main widget and layout
         self.main_widget = QWidget()
         self.setCentralWidget(self.main_widget)
         self.main_layout = QVBoxLayout(self.main_widget)
         self.main_layout.setSpacing(16)
         self.main_layout.setContentsMargins(20, 20, 20, 20)
 
-        # Button section
         self.button_card = CardWidget()
         self.button_card.setStyleSheet("""
             CardWidget {
@@ -372,11 +365,9 @@ class CRMDataVisualizer(QMainWindow):
         self.button_card.setLayout(self.button_layout)
         self.main_layout.addWidget(self.button_card)
 
-        # Filter and logo section
         self.filter_logo_layout = QHBoxLayout()
         self.filter_logo_layout.setSpacing(16)
 
-        # Filter section
         self.filter_card = CardWidget()
         self.filter_card.setStyleSheet("""
             CardWidget {
@@ -510,8 +501,8 @@ class CRMDataVisualizer(QMainWindow):
         self.tooltip_label.setFont(QFont("Segoe UI", 10))
 
         self.table_widget = QTableWidget()
-        self.table_widget.setColumnCount(8)
-        self.table_widget.setHorizontalHeaderLabels(["ID", "CRM ID", "Solution Label", "Element", "Value", "File Name", "Folder Name", "Date"])
+        self.table_widget.setColumnCount(9)  # Added column for blank_value
+        self.table_widget.setHorizontalHeaderLabels(["ID", "CRM ID", "Solution Label", "Element", "Value", "Blank Value", "File Name", "Folder Name", "Date"])
         self.table_widget.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.main_layout.addWidget(self.table_widget, stretch=1)
 
@@ -689,22 +680,49 @@ class CRMDataVisualizer(QMainWindow):
         self.filtered_crm_df_cache = filtered_crm_df
         self.filtered_blank_df_cache = filtered_blank_df
         QApplication.processEvents()
-        self.update_table(filtered_crm_df)
+        self.update_table(filtered_crm_df, filtered_blank_df)
         self.status_label.setText(f"Loaded {len(filtered_crm_df)} CRM records, {len(filtered_blank_df)} BLANK records")
         logging.info(f"Filtered {len(filtered_crm_df)} CRM records and {len(filtered_blank_df)} BLANK records")
 
-    def update_table(self, df):
-        self.table_widget.setRowCount(len(df))
-        for i, row in df.iterrows():
+    def update_table(self, crm_df, blank_df):
+        """Update table widget with both CRM and blank records."""
+        # Combine CRM and blank DataFrames
+        combined_df = pd.concat([crm_df, blank_df], ignore_index=True)
+        # Ensure all necessary columns are present
+        for col in ['id', 'crm_id', 'solution_label', 'element', 'value', 'file_name', 'folder_name', 'date']:
+            if col not in combined_df.columns:
+                combined_df[col] = pd.NA
+        combined_df = combined_df.sort_values(['date', 'crm_id', 'element'])
+        
+        # Add blank_value column (initially NA)
+        combined_df['blank_value'] = pd.NA
+        
+        # If blank correction is applied, update values and blank_value
+        if self.apply_blank_check.isChecked() and self.element_combo.currentText() != "All Elements" and self.crm_combo.currentText() != "All CRM IDs":
+            current_element = self.element_combo.currentText()
+            current_crm = self.crm_combo.currentText()
+            ver_value = self.get_verification_value(current_crm, current_element)
+            if ver_value is not None:
+                for idx, row in combined_df.iterrows():
+                    if row['crm_id'] != 'BLANK' and row['norm_crm_id'] == current_crm and row['element'].startswith(current_element):
+                        blank_value, corrected_value = self.select_best_blank(row, blank_df, ver_value)
+                        combined_df.at[idx, 'value'] = corrected_value
+                        combined_df.at[idx, 'blank_value'] = blank_value
+
+        self.table_widget.setRowCount(len(combined_df))
+        for i, row in combined_df.iterrows():
             QApplication.processEvents()
             self.table_widget.setItem(i, 0, QTableWidgetItem(str(row['id'])))
-            self.table_widget.setItem(i, 1, QTableWidgetItem(row['crm_id']))
-            self.table_widget.setItem(i, 2, QTableWidgetItem(row['solution_label']))
-            self.table_widget.setItem(i, 3, QTableWidgetItem(row['element']))
-            self.table_widget.setItem(i, 4, QTableWidgetItem(str(row['value'])))
-            self.table_widget.setItem(i, 5, QTableWidgetItem(row['file_name']))
-            self.table_widget.setItem(i, 6, QTableWidgetItem(row['folder_name']))
-            self.table_widget.setItem(i, 7, QTableWidgetItem(row['date']))
+            self.table_widget.setItem(i, 1, QTableWidgetItem(str(row['crm_id'])))
+            self.table_widget.setItem(i, 2, QTableWidgetItem(str(row['solution_label'])))
+            self.table_widget.setItem(i, 3, QTableWidgetItem(str(row['element'])))
+            self.table_widget.setItem(i, 4, QTableWidgetItem(f"{row['value']:.2f}" if pd.notna(row['value']) else ""))
+            self.table_widget.setItem(i, 5, QTableWidgetItem(f"{row['blank_value']:.2f}" if pd.notna(row['blank_value']) else ""))
+            self.table_widget.setItem(i, 6, QTableWidgetItem(str(row['file_name'])))
+            self.table_widget.setItem(i, 7, QTableWidgetItem(str(row['folder_name'])))
+            self.table_widget.setItem(i, 8, QTableWidgetItem(str(row['date'])))
+        
+        logging.info(f"Updated table with {len(combined_df)} records ({len(crm_df)} CRM, {len(blank_df)} BLANK)")
 
     def export_table(self):
         if self.plot_df_cache is None or self.plot_df_cache.empty:
@@ -795,16 +813,19 @@ class CRMDataVisualizer(QMainWindow):
                 conn.close()
 
     def select_best_blank(self, crm_row, blank_df, ver_value):
+        """Select the blank value that minimizes the difference between corrected CRM value and verification value."""
         if blank_df.empty or ver_value is None:
+            logger.debug(f"No blank correction applied: empty blank_df={blank_df.empty}, ver_value={ver_value}")
             return None, crm_row['value']
         
         relevant_blanks = blank_df[
             (blank_df['file_name'] == crm_row['file_name']) &
-            (blank_df['folder_name'] == crm_row['file_name']) &
+            (blank_df['folder_name'] == crm_row['folder_name']) &
             (blank_df['element'] == crm_row['element'])
         ]
         
         if relevant_blanks.empty:
+            logger.debug(f"No relevant blanks found for CRM: file={crm_row['file_name']}, folder={crm_row['folder_name']}, element={crm_row['element']}")
             return None, crm_row['value']
         
         best_blank_value = None
@@ -814,12 +835,22 @@ class CRMDataVisualizer(QMainWindow):
         for _, blank_row in relevant_blanks.iterrows():
             blank_value = blank_row['value']
             if pd.notna(blank_value):
-                corrected = crm_row['value'] - blank_value
-                diff = abs(corrected - ver_value)
-                if diff < best_diff:
-                    best_diff = diff
-                    best_blank_value = blank_value
-                    corrected_value = corrected
+                try:
+                    corrected = crm_row['value'] - blank_value
+                    diff = abs(corrected - ver_value)
+                    logger.debug(f"Blank: solution_label={blank_row['solution_label']}, value={blank_value}, corrected={corrected}, diff={diff}")
+                    if diff < best_diff:
+                        best_diff = diff
+                        best_blank_value = blank_value
+                        corrected_value = corrected
+                except (TypeError, ValueError) as e:
+                    logger.warning(f"Invalid blank value {blank_value} for CRM row {crm_row['id']}: {str(e)}")
+                    continue
+        
+        if best_blank_value is not None:
+            logger.info(f"Selected blank value {best_blank_value} for CRM row {crm_row['id']}, corrected value={corrected_value}, diff={best_diff}")
+        else:
+            logger.debug(f"No valid blank value selected for CRM row {crm_row['id']}, using original value={crm_row['value']}")
         
         return best_blank_value, corrected_value
 
@@ -833,7 +864,7 @@ class CRMDataVisualizer(QMainWindow):
             self.status_label.setText("No CRM data to plot")
             logging.info("No CRM data to plot due to empty filtered dataframe")
             self.plot_df_cache = pd.DataFrame()
-            self.update_table(self.plot_df_cache)
+            self.update_table(filtered_crm_df, filtered_blank_df)
             return
 
         percentage = 10.0
@@ -866,10 +897,10 @@ class CRMDataVisualizer(QMainWindow):
                     return group.loc[group['diff'].idxmin()]
                 crm_df = crm_df.groupby(['year', 'month', 'day']).apply(select_best).reset_index(drop=True)
 
-            if self.apply_blank_check.isChecked() and current_element != "All Elements" and ver_value is not None:
+            if self.apply_blank_check.isChecked() and current_element != "All Elements" and current_crm != "All CRM IDs" and ver_value is not None:
                 crm_df = crm_df.copy()
                 crm_df['original_value'] = crm_df['value']
-                crm_df['blank_value'] = None
+                crm_df['blank_value'] = pd.NA
                 for i, row in crm_df.iterrows():
                     blank_value, corrected_value = self.select_best_blank(row, filtered_blank_df, ver_value)
                     crm_df.at[i, 'value'] = corrected_value
@@ -900,7 +931,7 @@ class CRMDataVisualizer(QMainWindow):
                     logging.info(f"Plotted control lines for CRM {crm_id}, Element {current_element}")
 
         self.plot_df_cache = pd.concat([plot_df, crm_df], ignore_index=True) if not crm_df.empty else plot_df
-        self.update_table(self.plot_df_cache)
+        self.update_table(filtered_crm_df, filtered_blank_df)
         self.plot_widget.showGrid(x=True, y=True)
         self.status_label.setText(f"Plotted {len(self.plot_df_cache)} records")
         logging.info(f"Plotted {len(self.plot_df_cache)} records")
