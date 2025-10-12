@@ -16,6 +16,11 @@ from qfluentwidgets import (
     setTheme, Theme, FluentIcon, TitleLabel
 )
 from persiantools.jdatetime import JalaliDate
+from PyQt5.QtGui import QFont, QColor
+from PyQt5.QtCore import Qt
+import pandas as pd
+import openpyxl
+from openpyxl.styles import Font, PatternFill
 import numpy as np
 from pathlib import Path
 from PIL import Image
@@ -800,7 +805,7 @@ class OutOfRangeTableDialog(QDialog):
         self.out_df = out_df
         self.layout = QVBoxLayout()
         self.table_widget = QTableWidget()
-        self.table_widget.setColumnCount(5)  # Increased column count to include CRM ID
+        self.table_widget.setColumnCount(5)  # Removed Value Status column
         self.table_widget.setHorizontalHeaderLabels([
             "CRM ID", "Element", "Value", "Corrected Value", "Ref Value"
         ])
@@ -824,7 +829,7 @@ class OutOfRangeTableDialog(QDialog):
                 element_item = QTableWidgetItem(str(row['element']) if pd.notna(row['element']) else "")
                 value_item = QTableWidgetItem(f"{row['value']:.2f}" if pd.notna(row['value']) else "")
                 corrected_item = QTableWidgetItem(f"{row['corrected_value']:.2f}" if pd.notna(row['corrected_value']) else "")
-                ref_item = QTableWidgetItem(f"{row['ref_value']:.3f}" if pd.notna(row['ref_value']) else "")  # Updated to 3 decimal places
+                ref_item = QTableWidgetItem(f"{row['ref_value']:.3f}" if pd.notna(row['ref_value']) else "")
 
                 value_color = QColor('red') if row['out_no_blank'] else QColor('green')
                 corrected_color = QColor('red') if row['out_with_blank'] else QColor('green')
@@ -843,33 +848,68 @@ class OutOfRangeTableDialog(QDialog):
         self.table_widget.update()
         self.table_widget.repaint()
 
-        self.export_button = QPushButton("Export to CSV")
-        self.export_button.clicked.connect(self.export_to_csv)
+        self.export_button = QPushButton("Export to Excel")
+        self.export_button.clicked.connect(self.export_to_excel)
 
         self.layout.addWidget(self.table_widget)
         self.layout.addWidget(self.export_button)
         self.setLayout(self.layout)
 
-    def export_to_csv(self):
+    def export_to_excel(self):
         if self.out_df is None or self.out_df.empty:
             QMessageBox.warning(self, "Warning", "No data to export")
             return
 
-        fname, _ = QFileDialog.getSaveFileName(self, "Save CSV File", "", "CSV Files (*.csv)")
+        fname, _ = QFileDialog.getSaveFileName(self, "Save Excel File", "", "Excel Files (*.xlsx)")
         if fname:
             try:
-                self.out_df.to_csv(fname, index=False, encoding='utf-8')
+                # Prepare DataFrame for export, excluding out_no_blank and out_with_blank
+                export_df = self.out_df[['crm_id', 'element', 'value', 'corrected_value', 'ref_value']].copy()
+
+                # Save to Excel with openpyxl
+                with pd.ExcelWriter(fname, engine='openpyxl') as writer:
+                    export_df.to_excel(writer, index=False, sheet_name='OutOfRange')
+                    workbook = writer.book
+                    worksheet = writer.sheets['OutOfRange']
+
+                    # Define fonts and fill
+                    red_font = Font(color='FF0000')
+                    green_font = Font(color='008000')
+                    out_of_range_fill = PatternFill(start_color='F0F0F0', end_color='F0F0F0', fill_type='solid')
+
+                    # Apply formatting
+                    for row_idx, row in enumerate(self.out_df.itertuples(), start=2):  # Start from 2 to skip header
+                        value_out = row.out_no_blank
+                        corrected_out = row.out_with_blank
+                        # Apply font color to Value and Corrected Value columns
+                        value_cell = worksheet.cell(row=row_idx, column=3)  # Value column (index 3)
+                        corrected_cell = worksheet.cell(row=row_idx, column=4)  # Corrected Value column (index 4)
+                        value_cell.font = red_font if value_out else green_font
+                        corrected_cell.font = red_font if corrected_out else green_font
+
+                        # Apply row background color if out of range
+                        if value_out or corrected_out:
+                            for col_idx in range(1, 6):  # Columns A to E
+                                worksheet.cell(row=row_idx, column=col_idx).fill = out_of_range_fill
+
+                    # Adjust column widths
+                    for col in worksheet.columns:
+                        max_length = 0
+                        column = col[0].column_letter
+                        for cell in col:
+                            try:
+                                max_length = max(max_length, len(str(cell.value)))
+                            except:
+                                pass
+                        adjusted_width = max_length + 2
+                        worksheet.column_dimensions[column].width = adjusted_width
+
                 QMessageBox.information(self, "Success", f"Data exported to {fname}")
+                logger.info(f"Exported out-of-range data to {fname}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to export: {str(e)}")
+                logger.error(f"Error exporting Excel: {str(e)}")
 
-from PyQt5.QtCore import QThread, pyqtSignal
-import pandas as pd
-import sqlite3
-import re
-import logging
-
-logger = logging.getLogger()
 
 class OutOfRangeThread(QThread):
     out_of_range_data = pyqtSignal(pd.DataFrame)
@@ -902,39 +942,54 @@ class OutOfRangeThread(QThread):
                 self.progress_updated.emit(100)
                 return
 
-            unique_elements = crm_df['element'].unique()
+            # Extract base elements (e.g., 'Ce' from 'Ce 140')
+            crm_df['base_element'] = crm_df['element'].apply(lambda x: x.split()[0] if isinstance(x, str) and ' ' in x else x)
             unique_crms = crm_df['norm_crm_id'].unique()
+            unique_base_elements = crm_df['base_element'].unique()
+
+            self.progress_updated.emit(40)
 
             for crm_id in unique_crms:
-                for element in unique_elements:
-                    ver_value = self.get_verification_value(crm_id, element)
+                for base_element in unique_base_elements:
+                    # Get all wavelengths for this base element and CRM ID
+                    element_df = crm_df[(crm_df['norm_crm_id'] == crm_id) & (crm_df['base_element'] == base_element)]
+                    if element_df.empty:
+                        continue
+
+                    ver_value = self.get_verification_value(crm_id, base_element)
                     if ver_value is None:
                         continue
 
                     lcl = ver_value * (1 - self.percentage / 100)
                     ucl = ver_value * (1 + self.percentage / 100)
 
-                    element_df = crm_df[(crm_df['norm_crm_id'] == crm_id) & (crm_df['element'] == element)]
+                    # Calculate best wavelength based on corrected_value or value
+                    best_row = None
+                    min_diff = float('inf')
 
                     for _, row in element_df.iterrows():
                         value = row['value']
                         blank_value, corrected_value = self.select_best_blank(row, blank_df, ver_value)
 
-                        out_no_blank = not (lcl <= value <= ucl)
-                        out_with_blank = not (lcl <= corrected_value <= ucl) if blank_value is not None else out_no_blank
+                        # Use corrected_value if available, else use value
+                        target_value = corrected_value if pd.notna(corrected_value) else value
+                        diff = abs(target_value - ver_value)
 
-                        if out_no_blank or out_with_blank:
-                            new_row = {
-                                'crm_id': row['crm_id'],  # Added crm_id to the output DataFrame
-                                'element': element,
+                        if diff < min_diff:
+                            min_diff = diff
+                            best_row = {
+                                'crm_id': row['crm_id'],
+                                'element': row['element'],
                                 'value': value,
-                                'corrected_value': corrected_value if blank_value is not None else pd.NA,
+                                'corrected_value': corrected_value if pd.notna(corrected_value) else pd.NA,
                                 'ref_value': ver_value,
-                                'out_no_blank': out_no_blank,
-                                'out_with_blank': out_with_blank
+                                'out_no_blank': not (lcl <= value <= ucl),
+                                'out_with_blank': not (lcl <= corrected_value <= ucl) if pd.notna(corrected_value) else not (lcl <= value <= ucl)
                             }
-                            out_df = pd.concat([out_df, pd.DataFrame([new_row])], ignore_index=True)
-                            logger.info(f"Added out-of-range record: {new_row}")
+
+                    if best_row and (best_row['out_no_blank'] or best_row['out_with_blank']):
+                        out_df = pd.concat([out_df, pd.DataFrame([best_row])], ignore_index=True)
+                        logger.info(f"Added out-of-range record for CRM {crm_id}, Element {best_row['element']}: {best_row}")
 
             self.progress_updated.emit(100)
             self.out_of_range_data.emit(out_df)
