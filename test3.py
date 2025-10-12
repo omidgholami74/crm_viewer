@@ -799,7 +799,8 @@ class CRMDataVisualizer(QMainWindow):
         self.load_data_thread()
 
     def get_db_path(self, name):
-        return Path(__file__).parent / name
+        return name
+        # return Path(__file__).parent / name
 
     def load_default_logo(self):
         if self.logo_path.exists():
@@ -1130,7 +1131,7 @@ class CRMDataVisualizer(QMainWindow):
         blank_valid_pattern = re.compile(r'^(?:CRM\s*)?(?:BLANK|BLNK|Blank|blnk|blank)(?:\s*[a-zA-Z]{1,2})?$', re.IGNORECASE)
         
         valid_blanks = relevant_blanks[relevant_blanks['solution_label'].apply(lambda x: bool(blank_valid_pattern.match(str(x).strip())))]
-        
+        print(relevant_blanks,'valid blank :',valid_blanks)
         if valid_blanks.empty:
             logger.debug(f"No valid blanks found for CRM row {crm_row['id']}")
             return None, crm_row['value']
@@ -1145,7 +1146,8 @@ class CRMDataVisualizer(QMainWindow):
             if pd.notna(blank_value):
                 try:
                     corrected = crm_row['value'] - blank_value
-                    new_diff = abs(corrected - ver_value)
+                    new_diff = abs(ver_value-corrected)
+                    print(corrected,ver_value,blank_value)
                     logger.debug(f"Blank: solution_label={blank_row['solution_label']}, value={blank_value}, corrected={corrected}, new_diff={new_diff}, initial_diff={initial_diff}")
                     if new_diff < initial_diff:
                         best_diff = new_diff
@@ -1481,7 +1483,7 @@ class CRMDataVisualizer(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    sys.stdout.reconfigure(encoding='utf-8')
+    # sys.stdout.reconfigure(encoding='utf-8')
     window = CRMDataVisualizer()
     window.show()
     sys.exit(app.exec_())
