@@ -279,83 +279,215 @@ class DeviceSelectionDialog(QDialog):
         return self.device_combo.currentText()
 
 class LoadDeleteFilesDialogThread(QThread):
-    dialog_ready = pyqtSignal(list)
+    dialog_ready = pyqtSignal(list, dict)  # list of file_names, dict of record_counts
     error_occurred = pyqtSignal(str)
     progress_updated = pyqtSignal(int)
 
     def __init__(self, db_path, file_names):
         super().__init__()
         self.db_path = db_path
-        self.file_names = file_names
+        self.file_names = list(set(file_names))  # Remove duplicates upfront
+        self.record_counts = {}
 
     def run(self):
         try:
-            self.progress_updated.emit(20)
+            logger.info(f"Loading {len(self.file_names)} unique files for deletion dialog")
+            self.progress_updated.emit(10)
+            
+            # Single database connection for all queries
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-            record_counts = {}
-            for file_name in sorted(set(self.file_names)):
-                cursor.execute("SELECT COUNT(*) FROM crm_data WHERE file_name = ?", (file_name,))
-                count = cursor.fetchone()[0]
-                record_counts[file_name] = count
+            
+            total_files = len(self.file_names)
+            processed = 0
+            
+            # Use IN clause for better performance instead of individual queries
+            placeholders = ','.join(['?'] * total_files)
+            cursor.execute(f"""
+                SELECT file_name, COUNT(*) as record_count 
+                FROM crm_data 
+                WHERE file_name IN ({placeholders})
+                GROUP BY file_name
+            """, self.file_names)
+            
+            results = cursor.fetchall()
+            self.progress_updated.emit(80)
+            
+            # Create record_counts dictionary from results
+            for file_name, count in results:
+                self.record_counts[file_name] = count
+            
+            # For files not found in results, count is 0
+            for file_name in self.file_names:
+                if file_name not in self.record_counts:
+                    self.record_counts[file_name] = 0
+            
             conn.close()
             self.progress_updated.emit(100)
-            logger.info(f"Loaded {len(record_counts)} file records for deletion dialog")
-            self.dialog_ready.emit([file_name for file_name in record_counts])
+            
+            logger.info(f"Loaded record counts for {len(self.record_counts)} files")
+            self.dialog_ready.emit(sorted(self.file_names), self.record_counts)
+            
         except Exception as e:
             logger.error(f"Error loading delete files dialog: {str(e)}")
             self.error_occurred.emit(f"Failed to load files for deletion: {str(e)}")
+            self.progress_updated.emit(100)
 
 class DeleteFilesDialog(QDialog):
-    def __init__(self, parent=None, file_names=[], db_path=None):
+    def __init__(self, parent=None, file_names=None, db_path=None):
         super().__init__(parent)
         self.setWindowTitle("Delete Files")
-        self.setFixedSize(400, 400)
+        self.setFixedSize(500, 500)
         self.db_path = db_path
-        
-        self.layout = QVBoxLayout()
-        self.label = QLabel("Select files to delete (number of records shown):")
-        self.file_list = QListWidget()
         self.record_counts = {}
         
-        try:
-            conn = sqlite3.connect(self.db_path)
-            for file_name in sorted(set(file_names)):
-                cursor = conn.cursor()
-                cursor.execute("SELECT COUNT(*) FROM crm_data WHERE file_name = ?", (file_name,))
-                count = cursor.fetchone()[0]
-                self.record_counts[file_name] = count
-                item = QListWidgetItem(f"{file_name} ({count} records)")
-                item.setData(Qt.UserRole, file_name)
-                item.setCheckState(Qt.Unchecked)
-                item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
-                self.file_list.addItem(item)
-            conn.close()
-        except Exception as e:
-            logger.error(f"Error counting records: {str(e)}")
+        self.layout = QVBoxLayout()
+        
+        # Progress bar and status label
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setVisible(False)
+        
+        self.status_label = QLabel("Loading files... Please wait.")
+        self.status_label.setAlignment(Qt.AlignCenter)
+        
+        # Main content
+        self.main_label = QLabel("Select files to delete (number of records shown):")
+        self.file_list = QListWidget()
         
         self.button_layout = QHBoxLayout()
-        self.delete_button = QPushButton("Delete")
+        self.delete_button = QPushButton("Delete Selected")
         self.cancel_button = QPushButton("Cancel")
+        self.refresh_button = QPushButton("Refresh")
         
         self.button_layout.addWidget(self.delete_button)
+        self.button_layout.addWidget(self.refresh_button)
         self.button_layout.addWidget(self.cancel_button)
-        self.layout.addWidget(self.label)
+        
+        # Add widgets to layout
+        self.layout.addWidget(self.status_label)
+        self.layout.addWidget(self.progress_bar)
+        self.layout.addWidget(self.main_label)
         self.layout.addWidget(self.file_list)
         self.layout.addLayout(self.button_layout)
         self.setLayout(self.layout)
         
+        # Connections
         self.delete_button.clicked.connect(self.accept)
         self.cancel_button.clicked.connect(self.reject)
-
+        self.refresh_button.clicked.connect(self.refresh_files)
+        
+        # Load files if provided and non-empty, otherwise show empty message
+        if file_names is not None and len(file_names) > 0:  # Fix: Check length explicitly
+            self.load_files_async(file_names)
+        else:
+            self.status_label.setText("No files provided")
+            self.progress_bar.setVisible(False)
+            self.delete_button.setEnabled(False)
+            self.refresh_button.setEnabled(False)
+    
+    def load_files_async(self, file_names):
+        """Load files asynchronously with progress"""
+        self.progress_bar.setVisible(True)
+        self.delete_button.setEnabled(False)
+        self.cancel_button.setEnabled(False)
+        self.refresh_button.setEnabled(False)
+        self.file_list.clear()
+        
+        self.loader_thread = LoadDeleteFilesDialogThread(self.db_path, file_names)
+        self.loader_thread.dialog_ready.connect(self.on_files_loaded)
+        self.loader_thread.error_occurred.connect(self.on_load_error)
+        self.loader_thread.progress_updated.connect(self.progress_bar.setValue)
+        self.loader_thread.finished.connect(self.on_loading_finished)
+        self.loader_thread.start()
+    
+    def on_files_loaded(self, file_names, record_counts):
+        """Handle successful file loading"""
+        self.file_names = file_names
+        self.record_counts = record_counts
+        
+        # Populate file list
+        self.file_list.clear()
+        for file_name in file_names:
+            count = record_counts.get(file_name, 0)
+            item = QListWidgetItem(f"{file_name} ({count:,} records)")
+            item.setData(Qt.UserRole, file_name)
+            item.setCheckState(Qt.Unchecked)
+            item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            self.file_list.addItem(item)
+        
+        logger.info(f"Populated dialog with {len(file_names)} files")
+    
+    def on_load_error(self, error_message):
+        """Handle loading error"""
+        self.status_label.setText(f"Error: {error_message}")
+        logger.error(f"Delete dialog load error: {error_message}")
+        QMessageBox.critical(self, "Error", error_message)
+    
+    def on_loading_finished(self):
+        """Enable UI after loading completes"""
+        self.progress_bar.setVisible(False)
+        self.delete_button.setEnabled(True)
+        self.cancel_button.setEnabled(True)
+        self.refresh_button.setEnabled(True)
+        self.status_label.setText(f"Loaded {len(self.record_counts)} files")
+    
+    def refresh_files(self):
+        """Refresh file list"""
+        if hasattr(self, 'file_names') and self.file_names:
+            self.load_files_async(self.file_names)
+    
     def get_selected_files(self):
+        """Get selected files for deletion"""
         selected = []
         for i in range(self.file_list.count()):
             item = self.file_list.item(i)
             if item.checkState() == Qt.Checked:
                 selected.append(item.data(Qt.UserRole))
         return selected
-
+    
+    def get_total_records(self):
+        """Get total records for selected files"""
+        total = 0
+        for file_name in self.get_selected_files():
+            total += self.record_counts.get(file_name, 0)
+        return total
+    
+def delete_files(self):
+    """Updated delete_files method with async loading"""
+    all_df = pd.concat([self.crm_df, self.blank_df])
+    file_names = all_df['file_name'].unique().tolist()  # Convert to list explicitly
+    
+    if not file_names:  # Fix: Check if list is empty
+        QMessageBox.warning(self, "Warning", "No files to delete")
+        return
+    
+    # Show dialog with async loading
+    dialog = DeleteFilesDialog(self, file_names, self.crm_db_path)
+    
+    # Connect dialog signals to handle completion
+    if dialog.exec_() == QDialog.Accepted:
+        selected_files = dialog.get_selected_files()
+        if not selected_files:
+            QMessageBox.warning(self, "Warning", "No files selected for deletion")
+            return
+        
+        total_records = dialog.get_total_records()
+        confirm = QMessageBox.question(
+            self, "Confirm Delete",
+            f"Are you sure you want to delete {len(selected_files)} files with {total_records:,} records?\n\n"
+            f"Selected files:\n{chr(10).join(selected_files[:5])}{'...' if len(selected_files) > 5 else ''}",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if confirm == QMessageBox.Yes:
+            self.progress_bar.setVisible(True)
+            self.delete_thread = DeleteFilesThread(self.crm_db_path, selected_files)
+            self.delete_thread.delete_completed.connect(self.on_delete_completed)
+            self.delete_thread.error_occurred.connect(self.on_data_error)
+            self.delete_thread.progress_updated.connect(self.progress_bar.setValue)
+            self.delete_thread.finished.connect(lambda: self.progress_bar.setVisible(False))
+            self.delete_thread.start()
 class EditRecordDialog(QDialog):
     def __init__(self, parent=None, record=None, db_path=None):
         super().__init__(parent)
