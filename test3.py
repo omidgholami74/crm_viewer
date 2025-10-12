@@ -6,7 +6,7 @@ import logging
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QHeaderView, QProgressBar, QMessageBox,
-    QFileDialog, QLabel
+    QFileDialog, QLabel, QDialog, QComboBox, QPushButton, QListWidget, QListWidgetItem, QLineEdit
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont, QPixmap
@@ -21,25 +21,36 @@ from pathlib import Path
 from PIL import Image
 import csv
 import shutil
+import os
 
-# Setup logging
+# Setup logging with UTF-8 encoding
 log_file = Path("crm_visualizer.log").resolve()
-logging.basicConfig(
-    filename=log_file,
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    filemode='w'
-)
-logger = logging.getLogger()
+file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setLevel(logging.DEBUG)
 console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+logger = logging.getLogger()
+logger.setLevel(logging.DEBUG)
+logger.handlers = []
+logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 
+
 def normalize_crm_id(crm_id):
-    """Extract numeric part from CRM ID (e.g., 'CRM 258b' → '258')."""
-    match = re.match(r'(\d+)', str(crm_id).strip())
-    return match.group(1) if match else None
+    """Extract numeric part from CRM ID (e.g., 'CRM 258b' → '258', '258 b' → '258')."""
+    if not isinstance(crm_id, str):
+        return None
+    crm_pattern = re.compile(r'^(?:\s*CRM\s*)?(\d{3})(?:\s*[a-zA-Z])?$', re.IGNORECASE)
+    match = crm_pattern.match(crm_id.strip())
+    if match:
+        # logger.debug(f"Normalized CRM ID: {crm_id} → {match.group(1)}")
+        return match.group(1)
+    # logger.debug(f"Invalid CRM ID format: {crm_id}")
+    return None
 
 def validate_jalali_date(date_str):
     """Validate Jalali date string (YYYY/MM/DD)."""
@@ -69,16 +80,15 @@ def split_element_name(element):
     return element
 
 def extract_date(file_name):
-    """Extract date from file_name like '1404-01-01' or '1404-01-1'."""
+    """Extract date from file_name like '1404-07-01' or '1404-07-1'."""
     try:
         match = re.match(r'(\d{4}-\d{2}-\d{1,2})', file_name)
         if match:
             date_str = match.group(1)
             year, month, day = map(int, date_str.split('-'))
-            date_str = f"{year:04d}-{month:02d}-{day:02d}"
-            year, month, day = map(int, date_str.split('-'))
-            # logger.debug(f"Extracted and normalized date from {file_name}: {date_str}")
-            return JalaliDate(year, month, day).strftime("%Y/%m/%d")
+            date_str = f"{year:04d}/{month:02d}/{day:02d}"
+            JalaliDate(year, month, day)  # Validate Jalali date
+            return date_str
         logger.warning(f"No valid date found in filename: {file_name}")
         return None
     except Exception as e:
@@ -95,10 +105,35 @@ def is_numeric(value):
     except ValueError:
         return False
 
-def load_raw_file(file_path, db_path):
+def vacuum_db(db_path):
+    """Run VACUUM on the database to reclaim space."""
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.execute("VACUUM")
+        conn.commit()
+        conn.close()
+        logger.info(f"Database vacuumed successfully: {db_path}")
+    except Exception as e:
+        logger.error(f"Error vacuuming database {db_path}: {str(e)}")
+
+def load_raw_file(file_path, db_path, selected_device=None):
     """Load and parse raw CSV/.rep file into a DataFrame with required columns."""
     file_path = Path(file_path)
-    logger.info(f"Processing raw file: {file_path}")
+    logger.info(f"Processing raw file: {file_path} with device: {selected_device}")
+    allowed_crms = ['258', '252', '906', '506', '233', '255', '263', '260']
+    crm_pattern = re.compile(r'^(?:\s*CRM\s*)?(\d{3}(?:\s*[a-zA-Z])?)$', re.IGNORECASE)
+    blank_pattern = re.compile(r'(?:CRM\s*)?(?:BLANK|BLNK)(?:S|s)?(?:\s+.*)?', re.IGNORECASE)
+
+    # Check for duplicate file
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM crm_data WHERE file_name = ?", (file_path.name,))
+    if cursor.fetchone()[0] > 0:
+        conn.close()
+        logger.warning(f"File {file_path.name} already exists in database")
+        raise ValueError(f"File {file_path.name} already exists in the database")
+    conn.close()
+
     try:
         is_new_format = False
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -109,6 +144,11 @@ def load_raw_file(file_path, db_path):
         logger.info(f"File {file_path.name} detected as {'new' if is_new_format else 'old'} format")
 
         data_rows = []
+        file_date = extract_date(file_path.name)
+        if not file_date:
+            logger.error(f"Invalid date in file name: {file_path.name}")
+            raise ValueError(f"Invalid date in file name: {file_path.name}")
+
         if is_new_format:
             current_sample = None
             with open(file_path, 'r', encoding='utf-8') as f:
@@ -120,83 +160,286 @@ def load_raw_file(file_path, db_path):
                         logger.debug(f"Skipping last row {idx} in {file_path.name}")
                         continue
                     if not row or all(cell.strip() == "" for cell in row):
+                        logger.debug(f"Skipping empty row {idx} in {file_path.name}")
                         continue
                     
                     if len(row) > 0 and row[0].startswith("Sample ID:"):
                         current_sample = row[1].strip() if len(row) > 1 else "Unknown_Sample"
+                        logger.debug(f"Set current_sample to {current_sample} at row {idx}")
                         continue
                     
                     if len(row) > 0 and (row[0].startswith("Method File:") or row[0].startswith("Calibration File:")):
+                        logger.debug(f"Skipping metadata row {idx} in {file_path.name}")
                         continue
                     
                     if current_sample is None:
                         current_sample = "Unknown_Sample"
                         logger.warning(f"No Sample ID found before row {idx}, using default: {current_sample}")
                     
-                    element = split_element_name(row[0].strip())
-                    try:
+                    # Check for BLANK
+                    blank_match = blank_pattern.search(current_sample)
+                    if blank_match:
+                        element = split_element_name(row[0].strip())
                         concentration = float(row[5]) if len(row) > 5 and is_numeric(row[5]) else None
                         if concentration is not None:
-                            type_value = "BLANK" if "BLANK" in current_sample.upper() else current_sample
                             data_rows.append({
-                                "crm_id": type_value,
+                                "crm_id": "BLANK",
                                 "solution_label": current_sample,
                                 "element": element,
                                 "value": concentration,
                                 "file_name": file_path.name,
-                                "folder_name": str(file_path.parent.name)
+                                "folder_name": selected_device or str(file_path.parent.name),
+                                "date": file_date
                             })
+                            logger.debug(f"Added BLANK row: Solution Label={current_sample}, Element={element}, Value={concentration}")
                         else:
-                            logger.warning(f"Skipping row {idx} in {file_path.name}: Non-numeric concentration - Corr Con={row[5] if len(row) > 5 else 'N/A'}")
-                    except Exception as e:
-                        logger.error(f"Error processing row {idx} in {file_path.name}: {str(e)}")
+                            logger.warning(f"Skipping BLANK row {idx} in {file_path.name}: Non-numeric concentration")
                         continue
+                    
+                    # Check for CRM
+                    crm_match = crm_pattern.search(current_sample)
+                    if crm_match:
+                        crm_id = normalize_crm_id(current_sample)
+                        if crm_id in allowed_crms:
+                            element = split_element_name(row[0].strip())
+                            concentration = float(row[5]) if len(row) > 5 and is_numeric(row[5]) else None
+                            if concentration is not None:
+                                data_rows.append({
+                                    "crm_id": crm_id,
+                                    "solution_label": current_sample,
+                                    "element": element,
+                                    "value": concentration,
+                                    "file_name": file_path.name,
+                                    "folder_name": selected_device or str(file_path.parent.name),
+                                    "date": file_date
+                                })
+                                logger.debug(f"Added CRM row: CRM ID={crm_id}, Solution Label={current_sample}, Element={element}, Value={concentration}")
+                            else:
+                                logger.warning(f"Skipping CRM row {idx} in {file_path.name}: Non-numeric concentration")
+                        else:
+                            logger.debug(f"Skipping row {idx} in {file_path.name}: Invalid CRM ID {crm_id} not in {allowed_crms}")
+                    else:
+                        logger.debug(f"Skipping row {idx} in {file_path.name}: No valid CRM or BLANK ID in {current_sample}")
         else:
-                temp_df = pd.read_csv(file_path, header=None, nrows=1, encoding='utf-8')
-                logger.debug(f"CSV header preview for {file_path.name}: {temp_df.to_string()}")
-                if temp_df.iloc[0].notna().sum() == 1:
-                    df = pd.read_csv(file_path, header=1, encoding='utf-8', on_bad_lines='skip')
-                else:
-                    df = pd.read_csv(file_path, header=0, encoding='utf-8', on_bad_lines='skip')
-                logger.debug(f"Loaded CSV {file_path.name} with {len(df)} rows")
-                
-                df = df.iloc[:-1]
-                logger.debug(f"Removed last row, remaining rows: {len(df)}")
-                
-                expected_columns = ["Solution Label", "Element", "Int", "Corr Con"]
-                column_mapping = {"Sample ID": "Solution Label"}
-                df.rename(columns=column_mapping, inplace=True)
-                
-                if not all(col in df.columns for col in expected_columns):
-                    missing_cols = set(expected_columns) - set(df.columns)
-                    logger.error(f"Required columns missing in {file_path.name}: {', '.join(missing_cols)}")
-                    raise ValueError(f"Required columns missing: {', '.join(missing_cols)}")
-                
-                df['Element'] = df['Element'].apply(split_element_name)
-                df['crm_id'] = df['Solution Label'].apply(lambda x: "BLANK" if "BLANK" in str(x).upper() else x)
-                df['value'] = pd.to_numeric(df['Corr Con'], errors='coerce')
-                df = df.dropna(subset=['value'])
-                df['file_name'] = file_path.name
-                df['folder_name'] = str(file_path.parent.name)
-                data_rows = df[['crm_id', 'Solution Label', 'Element', 'value', 'file_name', 'folder_name']].rename(
-                    columns={'Solution Label': 'solution_label', 'Element': 'element'}
-                ).to_dict('records')
+            temp_df = pd.read_csv(file_path, header=None, nrows=1, encoding='utf-8', on_bad_lines='skip')
+            logger.debug(f"CSV header preview for {file_path.name}: {temp_df.to_string()}")
+            if temp_df.iloc[0].notna().sum() == 1:
+                df = pd.read_csv(file_path, header=1, encoding='utf-8', on_bad_lines='skip')
+            else:
+                df = pd.read_csv(file_path, header=0, encoding='utf-8', on_bad_lines='skip')
+            logger.debug(f"Loaded CSV {file_path.name} with {len(df)} rows")
+            
+            df = df.iloc[:-1]
+            logger.debug(f"Removed last row, remaining rows: {len(df)}")
+            
+            expected_columns = ["Solution Label", "Element", "Corr Con"]
+            column_mapping = {"Sample ID": "Solution Label"}
+            df.rename(columns=column_mapping, inplace=True)
+            
+            if not all(col in df.columns for col in expected_columns):
+                missing_cols = set(expected_columns) - set(df.columns)
+                logger.error(f"Required columns missing in {file_path.name}: {', '.join(missing_cols)}")
+                raise ValueError(f"Required columns missing: {', '.join(missing_cols)}")
+            
+            df['Element'] = df['Element'].apply(split_element_name)
+            df['crm_id'] = df['Solution Label'].apply(
+                lambda x: "BLANK" if blank_pattern.search(str(x)) else normalize_crm_id(str(x))
+            )
+            df = df[df['crm_id'].notna()]
+            df['norm_crm_id'] = df['crm_id'].apply(normalize_crm_id)
+            df = df[(df['crm_id'] == "BLANK") | (df['norm_crm_id'].isin(allowed_crms))]
+            df['value'] = pd.to_numeric(df['Corr Con'], errors='coerce')
+            df = df.dropna(subset=['value'])
+            df['file_name'] = file_path.name
+            df['folder_name'] = selected_device or str(file_path.parent.name)
+            df['date'] = file_date
+            data_rows = df[['crm_id', 'Solution Label', 'Element', 'value', 'file_name', 'folder_name', 'date']].rename(
+                columns={'Solution Label': 'solution_label', 'Element': 'element'}
+            ).to_dict('records')
         
         if not data_rows:
             logger.error(f"No valid data found in {file_path.name}")
             raise ValueError("No valid data found in the file")
         
         df = pd.DataFrame(data_rows)
-        # Do not assign 'id' column; let SQLite handle it
-        df = df[['crm_id', 'solution_label', 'element', 'value', 'file_name', 'folder_name']]
+        required_columns = ['crm_id', 'solution_label', 'element', 'value', 'file_name', 'folder_name', 'date']
+        for col in required_columns:
+            if col not in df.columns:
+                logger.error(f"Missing required column {col} in DataFrame for {file_path.name}")
+                raise ValueError(f"Missing required column {col}")
+        
         logger.debug(f"Final DataFrame columns: {df.columns.tolist()}")
         logger.debug(f"Final DataFrame sample:\n{df.head().to_string()}")
+        logger.debug(f"Unique crm_id values: {df['crm_id'].unique()}")
         logger.info(f"Successfully processed {file_path.name} with {len(df)} rows")
         return df
     
     except Exception as e:
         logger.error(f"Error loading {file_path}: {str(e)}")
         raise
+
+class DeviceSelectionDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select Device")
+        self.setFixedSize(300, 150)
+        
+        self.layout = QVBoxLayout()
+        self.label = QLabel("Please select the device type for the imported file:")
+        self.device_combo = QComboBox()
+        self.device_combo.addItems(['mass', 'oes 4ac', 'oes fire'])
+        self.button_layout = QHBoxLayout()
+        self.ok_button = QPushButton("OK")
+        self.cancel_button = QPushButton("Cancel")
+        
+        self.button_layout.addWidget(self.ok_button)
+        self.button_layout.addWidget(self.cancel_button)
+        self.layout.addWidget(self.label)
+        self.layout.addWidget(self.device_combo)
+        self.layout.addLayout(self.button_layout)
+        self.setLayout(self.layout)
+        
+        self.ok_button.clicked.connect(self.accept)
+        self.cancel_button.clicked.connect(self.reject)
+
+    def get_device(self):
+        return self.device_combo.currentText()
+
+class LoadDeleteFilesDialogThread(QThread):
+    dialog_ready = pyqtSignal(list)
+    error_occurred = pyqtSignal(str)
+    progress_updated = pyqtSignal(int)
+
+    def __init__(self, db_path, file_names):
+        super().__init__()
+        self.db_path = db_path
+        self.file_names = file_names
+
+    def run(self):
+        try:
+            self.progress_updated.emit(20)
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            record_counts = {}
+            for file_name in sorted(set(self.file_names)):
+                cursor.execute("SELECT COUNT(*) FROM crm_data WHERE file_name = ?", (file_name,))
+                count = cursor.fetchone()[0]
+                record_counts[file_name] = count
+            conn.close()
+            self.progress_updated.emit(100)
+            logger.info(f"Loaded {len(record_counts)} file records for deletion dialog")
+            self.dialog_ready.emit([file_name for file_name in record_counts])
+        except Exception as e:
+            logger.error(f"Error loading delete files dialog: {str(e)}")
+            self.error_occurred.emit(f"Failed to load files for deletion: {str(e)}")
+
+class DeleteFilesDialog(QDialog):
+    def __init__(self, parent=None, file_names=[], db_path=None):
+        super().__init__(parent)
+        self.setWindowTitle("Delete Files")
+        self.setFixedSize(400, 400)
+        self.db_path = db_path
+        
+        self.layout = QVBoxLayout()
+        self.label = QLabel("Select files to delete (number of records shown):")
+        self.file_list = QListWidget()
+        self.record_counts = {}
+        
+        for file_name in sorted(set(file_names)):
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM crm_data WHERE file_name = ?", (file_name,))
+            count = cursor.fetchone()[0]
+            conn.close()
+            self.record_counts[file_name] = count
+            item = QListWidgetItem(f"{file_name} ({count} records)")
+            item.setData(Qt.UserRole, file_name)
+            item.setCheckState(Qt.Unchecked)
+            item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            self.file_list.addItem(item)
+        
+        self.button_layout = QHBoxLayout()
+        self.delete_button = QPushButton("Delete")
+        self.cancel_button = QPushButton("Cancel")
+        
+        self.button_layout.addWidget(self.delete_button)
+        self.button_layout.addWidget(self.cancel_button)
+        self.layout.addWidget(self.label)
+        self.layout.addWidget(self.file_list)
+        self.layout.addLayout(self.button_layout)
+        self.setLayout(self.layout)
+        
+        self.delete_button.clicked.connect(self.accept)
+        self.cancel_button.clicked.connect(self.reject)
+
+    def get_selected_files(self):
+        selected = []
+        for i in range(self.file_list.count()):
+            item = self.file_list.item(i)
+            if item.checkState() == Qt.Checked:
+                selected.append(item.data(Qt.UserRole))
+        return selected
+
+class EditRecordDialog(QDialog):
+    def __init__(self, parent=None, record=None, db_path=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Record")
+        self.setFixedSize(400, 300)
+        self.record = record
+        self.db_path = db_path
+        
+        self.layout = QVBoxLayout()
+        
+        self.crm_id_label = QLabel("CRM ID:")
+        self.crm_id_edit = LineEdit()
+        self.crm_id_edit.setText(str(record['crm_id']) if pd.notna(record['crm_id']) else "")
+        
+        self.solution_label = QLabel("Solution Label:")
+        self.solution_edit = LineEdit()
+        self.solution_edit.setText(str(record['solution_label']) if pd.notna(record['solution_label']) else "")
+        
+        self.element_label = QLabel("Element:")
+        self.element_edit = LineEdit()
+        self.element_edit.setText(str(record['element']) if pd.notna(record['element']) else "")
+        
+        self.value_label = QLabel("Value:")
+        self.value_edit = LineEdit()
+        self.value_edit.setText(f"{record['value']:.2f}" if pd.notna(record['value']) else "")
+        
+        self.date_label = QLabel("Date (YYYY/MM/DD):")
+        self.date_edit = LineEdit()
+        self.date_edit.setText(str(record['date']) if pd.notna(record['date']) else "")
+        
+        self.button_layout = QHBoxLayout()
+        self.save_button = QPushButton("Save")
+        self.cancel_button = QPushButton("Cancel")
+        
+        self.button_layout.addWidget(self.save_button)
+        self.button_layout.addWidget(self.cancel_button)
+        self.layout.addWidget(self.crm_id_label)
+        self.layout.addWidget(self.crm_id_edit)
+        self.layout.addWidget(self.solution_label)
+        self.layout.addWidget(self.solution_edit)
+        self.layout.addWidget(self.element_label)
+        self.layout.addWidget(self.element_edit)
+        self.layout.addWidget(self.value_label)
+        self.layout.addWidget(self.value_edit)
+        self.layout.addWidget(self.date_label)
+        self.layout.addWidget(self.date_edit)
+        self.layout.addLayout(self.button_layout)
+        self.setLayout(self.layout)
+        
+        self.save_button.clicked.connect(self.accept)
+        self.cancel_button.clicked.connect(self.reject)
+
+    def get_updated_record(self):
+        return {
+            'crm_id': self.crm_id_edit.text(),
+            'solution_label': self.solution_edit.text(),
+            'element': self.element_edit.text(),
+            'value': float(self.value_edit.text()) if is_numeric(self.value_edit.text()) else self.record['value'],
+            'date': self.date_edit.text() if validate_jalali_date(self.date_edit.text()) else self.record['date']
+        }
 
 class DataLoaderThread(QThread):
     data_loaded = pyqtSignal(pd.DataFrame, pd.DataFrame)
@@ -209,28 +452,34 @@ class DataLoaderThread(QThread):
 
     def run(self):
         try:
-            logging.debug(f"Loading data from {self.db_path}")
+            logger.debug(f"Loading data from {self.db_path}")
             self.progress_updated.emit(20)
             conn = sqlite3.connect(self.db_path)
             df = pd.read_sql_query("SELECT * FROM crm_data", conn)
             conn.close()
             self.progress_updated.emit(60)
 
-            df['date'] = df['file_name'].apply(extract_date)
+            if 'date' not in df.columns or df['date'].isna().all():
+                df['date'] = df['file_name'].apply(extract_date)
             df = df.dropna(subset=['date'])
-            df['year'] = df['date'].apply(lambda x: int(x.split('/')[0]))
-            df['month'] = df['date'].apply(lambda x: int(x.split('/')[1]))
-            df['day'] = df['date'].apply(lambda x: int(x.split('/')[2]))
+            df['year'] = df['date'].apply(lambda x: int(x.split('/')[0]) if pd.notna(x) else 0)
+            df['month'] = df['date'].apply(lambda x: int(x.split('/')[1]) if pd.notna(x) else 0)
+            df['day'] = df['date'].apply(lambda x: int(x.split('/')[2]) if pd.notna(x) else 0)
             self.progress_updated.emit(80)
 
             crm_df = df[df['crm_id'] != 'BLANK'].copy()
             blank_df = df[df['crm_id'] == 'BLANK'].copy()
+            allowed_crms = ['258', '252', '906', '506', '233', '255', '263', '260']
             crm_df['norm_crm_id'] = crm_df['crm_id'].apply(normalize_crm_id)
+            crm_df = crm_df[crm_df['norm_crm_id'].isin(allowed_crms)].dropna(subset=['norm_crm_id'])
+            logger.debug(f"Sample CRM dates: {crm_df['date'].head(10).to_list()}")
+            logger.debug(f"Sample BLANK dates: {blank_df['date'].head(10).to_list()}")
+            logger.debug(f"Unique norm_crm_id values: {crm_df['norm_crm_id'].unique()}")
             self.progress_updated.emit(100)
-            logging.debug(f"Loaded {len(crm_df)} CRM records and {len(blank_df)} BLANK records from {self.db_path}")
+            logger.info(f"Loaded {len(crm_df)} CRM records and {len(blank_df)} BLANK records from {self.db_path}")
             self.data_loaded.emit(crm_df, blank_df)
         except Exception as e:
-            logging.error(f"Data loading error: {str(e)}")
+            logger.error(f"Data loading error: {str(e)}")
             self.error_occurred.emit(f"Failed to load data: {str(e)}")
 
 class ImportFileThread(QThread):
@@ -238,10 +487,11 @@ class ImportFileThread(QThread):
     error_occurred = pyqtSignal(str)
     progress_updated = pyqtSignal(int)
 
-    def __init__(self, file_path, db_path):
+    def __init__(self, file_path, db_path, selected_device=None):
         super().__init__()
         self.file_path = file_path
         self.db_path = db_path
+        self.selected_device = selected_device
 
     def run(self):
         try:
@@ -253,25 +503,55 @@ class ImportFileThread(QThread):
                 csv_path = file_path.with_suffix('.csv')
                 if not csv_path.exists():
                     shutil.copy(file_path, csv_path)
-                    logging.debug(f"Converted {file_path} to {csv_path}")
+                    logger.debug(f"Converted {file_path} to {csv_path}")
                 file_path = csv_path
                 ext = '.csv'
 
             if ext != '.csv':
                 raise ValueError("Unsupported file format. Only CSV and .rep are allowed.")
 
-            df = load_raw_file(file_path, self.db_path)
+            df = load_raw_file(file_path, self.db_path, self.selected_device)
             self.progress_updated.emit(50)
 
             conn = sqlite3.connect(self.db_path)
             df.to_sql('crm_data', conn, if_exists='append', index=False)
+            conn.commit()
             conn.close()
+            vacuum_db(self.db_path)  # Vacuum database after import
             self.progress_updated.emit(100)
-            logging.info(f"Imported {len(df)} records from {file_path} to {self.db_path}")
+            logger.info(f"Imported {len(df)} records from {file_path} to {self.db_path} with device {self.selected_device}")
             self.import_completed.emit(df)
         except Exception as e:
-            logging.error(f"Import error: {str(e)}")
+            logger.error(f"Import error: {str(e)}")
             self.error_occurred.emit(f"Failed to import file: {str(e)}")
+
+class DeleteFilesThread(QThread):
+    delete_completed = pyqtSignal()
+    error_occurred = pyqtSignal(str)
+    progress_updated = pyqtSignal(int)
+
+    def __init__(self, db_path, selected_files):
+        super().__init__()
+        self.db_path = db_path
+        self.selected_files = selected_files
+
+    def run(self):
+        try:
+            self.progress_updated.emit(20)
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            placeholders = ','.join(['?'] * len(self.selected_files))
+            cursor.execute(f"DELETE FROM crm_data WHERE file_name IN ({placeholders})", self.selected_files)
+            conn.commit()
+            deleted_rows = cursor.rowcount
+            conn.close()
+            vacuum_db(self.db_path)  # Vacuum database after deletion
+            self.progress_updated.emit(100)
+            logger.info(f"Deleted {deleted_rows} records for files: {self.selected_files}")
+            self.delete_completed.emit()
+        except Exception as e:
+            logger.error(f"Delete error: {str(e)}")
+            self.error_occurred.emit(f"Failed to delete files: {str(e)}")
 
 class FilterThread(QThread):
     filtered_data = pyqtSignal(pd.DataFrame, pd.DataFrame)
@@ -286,7 +566,7 @@ class FilterThread(QThread):
     def run(self):
         filtered_crm_df = self.crm_df.copy()
         filtered_blank_df = self.blank_df.copy()
-        logging.debug(f"Applying filters: {self.filters}")
+        logger.debug(f"Applying filters: {self.filters}")
         self.progress_updated.emit(20)
         
         if self.filters['device'] != "All Devices":
@@ -311,7 +591,7 @@ class FilterThread(QThread):
             filtered_blank_df = filtered_blank_df[filtered_blank_df['date'] <= self.filters['to_date'].strftime("%Y/%m/%d")]
         
         self.progress_updated.emit(100)
-        logging.debug(f"Filtered {len(filtered_crm_df)} CRM records and {len(filtered_blank_df)} BLANK records")
+        logger.debug(f"Filtered {len(filtered_crm_df)} CRM records and {len(filtered_blank_df)} BLANK records")
         self.filtered_data.emit(filtered_crm_df, filtered_blank_df)
 
 class CRMDataVisualizer(QMainWindow):
@@ -353,12 +633,14 @@ class CRMDataVisualizer(QMainWindow):
         self.button_layout.setContentsMargins(15, 10, 15, 10)
         self.import_button = PrimaryPushButton("Import File", self, FluentIcon.DOWNLOAD)
         self.export_button = PrimaryPushButton("Export Table", self, FluentIcon.SAVE)
-        self.plot_button = PrimaryPushButton("Plot Data", self)
+        self.delete_button = PrimaryPushButton("Delete Files", self, FluentIcon.DELETE)
+        self.edit_button = PrimaryPushButton("Edit Record", self, FluentIcon.EDIT)
         self.save_button = PrimaryPushButton("Save Plot", self, FluentIcon.SAVE)
         self.reset_button = PrimaryPushButton("Reset Filters", self, FluentIcon.SYNC)
         self.button_layout.addWidget(self.import_button)
         self.button_layout.addWidget(self.export_button)
-        self.button_layout.addWidget(self.plot_button)
+        self.button_layout.addWidget(self.delete_button)
+        self.button_layout.addWidget(self.edit_button)
         self.button_layout.addWidget(self.save_button)
         self.button_layout.addWidget(self.reset_button)
         self.button_layout.addStretch()
@@ -413,6 +695,7 @@ class CRMDataVisualizer(QMainWindow):
         self.percentage_edit.setPlaceholderText("%")
         self.percentage_edit.setFixedWidth(80)
         self.percentage_edit.setText("10")
+        self.plot_button = PrimaryPushButton("Plot Data", self)
         self.controls_layout.addWidget(self.device_label)
         self.controls_layout.addWidget(self.device_combo)
         self.controls_layout.addWidget(self.element_label)
@@ -425,6 +708,7 @@ class CRMDataVisualizer(QMainWindow):
         self.controls_layout.addWidget(self.to_date_edit)
         self.controls_layout.addWidget(self.percentage_label)
         self.controls_layout.addWidget(self.percentage_edit)
+        self.controls_layout.addWidget(self.plot_button)
         self.controls_layout.addStretch()
         self.filter_layout.addLayout(self.controls_layout)
 
@@ -501,9 +785,11 @@ class CRMDataVisualizer(QMainWindow):
         self.tooltip_label.setFont(QFont("Segoe UI", 10))
 
         self.table_widget = QTableWidget()
-        self.table_widget.setColumnCount(9)  # Added column for blank_value
+        self.table_widget.setColumnCount(9)
         self.table_widget.setHorizontalHeaderLabels(["ID", "CRM ID", "Solution Label", "Element", "Value", "Blank Value", "File Name", "Folder Name", "Date"])
         self.table_widget.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table_widget.setSelectionMode(QTableWidget.SingleSelection)
+        self.table_widget.setEditTriggers(QTableWidget.NoEditTriggers)
         self.main_layout.addWidget(self.table_widget, stretch=1)
 
         self.status_label = QLabel("Loading data...")
@@ -519,6 +805,8 @@ class CRMDataVisualizer(QMainWindow):
         self.apply_blank_check.stateChanged.connect(self.on_filter_changed)
         self.import_button.clicked.connect(self.import_file)
         self.export_button.clicked.connect(self.export_table)
+        self.delete_button.clicked.connect(self.delete_files)
+        self.edit_button.clicked.connect(self.edit_record)
         self.plot_button.clicked.connect(self.plot_data)
         self.save_button.clicked.connect(self.save_plot)
         self.reset_button.clicked.connect(self.reset_filters)
@@ -528,7 +816,7 @@ class CRMDataVisualizer(QMainWindow):
         self.apply_styles()
         self.load_default_logo()
 
-        logging.debug("Initializing CRMDataVisualizer")
+        logger.debug("Initializing CRMDataVisualizer")
         self.load_data_thread()
 
     def get_db_path(self, name):
@@ -538,9 +826,9 @@ class CRMDataVisualizer(QMainWindow):
         if self.logo_path.exists():
             pixmap = QPixmap(str(self.logo_path))
             self.logo_label.setPixmap(pixmap.scaled(100, 50, Qt.KeepAspectRatio))
-            logging.info(f"Default logo loaded: {self.logo_path}")
+            logger.info(f"Default logo loaded: {self.logo_path}")
         else:
-            logging.warning(f"Default logo not found at: {self.logo_path}")
+            logger.warning(f"Default logo not found at: {self.logo_path}")
 
     def load_data_thread(self):
         self.progress_bar.setVisible(True)
@@ -554,25 +842,93 @@ class CRMDataVisualizer(QMainWindow):
     def import_file(self):
         fname, _ = QFileDialog.getOpenFileName(self, "Import File", "", "CSV or REP Files (*.csv *.rep)")
         if fname:
+            dialog = DeviceSelectionDialog(self)
+            if dialog.exec_() == QDialog.Accepted:
+                selected_device = dialog.get_device()
+                logger.debug(f"Selected device for import: {selected_device}")
+                self.progress_bar.setVisible(True)
+                self.import_thread = ImportFileThread(fname, self.crm_db_path, selected_device)
+                self.import_thread.import_completed.connect(self.on_import_completed)
+                self.import_thread.error_occurred.connect(self.on_data_error)
+                self.import_thread.progress_updated.connect(self.progress_bar.setValue)
+                self.import_thread.finished.connect(lambda: self.progress_bar.setVisible(False))
+                self.import_thread.start()
+            else:
+                logger.debug("Import canceled by user")
+
+    def delete_files(self):
+        all_df = pd.concat([self.filtered_crm_df_cache, self.filtered_blank_df_cache], ignore_index=True)
+        if all_df.empty:
+            QMessageBox.warning(self, "Warning", "No data available to delete")
+            logger.warning("No data available to delete")
+            return
+        
+        if 'file_name' not in all_df.columns:
+            logger.error("Column 'file_name' not found in combined DataFrame")
+            QMessageBox.critical(self, "Error", "Internal error: 'file_name' column missing")
+            return
+        
+        file_names = all_df['file_name'].unique()
+        if len(file_names) == 0:
+            QMessageBox.warning(self, "Warning", "No files to delete")
+            logger.warning("No files to delete")
+            return
+        
+        self.progress_bar.setVisible(True)
+        self.delete_dialog_thread = LoadDeleteFilesDialogThread(self.crm_db_path, file_names)
+        self.delete_dialog_thread.dialog_ready.connect(self.show_delete_files_dialog)
+        self.delete_dialog_thread.error_occurred.connect(self.on_data_error)
+        self.delete_dialog_thread.progress_updated.connect(self.progress_bar.setValue)
+        self.delete_dialog_thread.finished.connect(lambda: self.progress_bar.setVisible(False))
+        self.delete_dialog_thread.start()
+
+    def show_delete_files_dialog(self, file_names):
+        dialog = DeleteFilesDialog(self, file_names, self.crm_db_path)
+        if dialog.exec_() == QDialog.Accepted:
+            selected_files = dialog.get_selected_files()
+            if not selected_files:
+                QMessageBox.warning(self, "Warning", "No files selected for deletion")
+                return
+            
+            total_records = sum(dialog.record_counts.get(f, 0) for f in selected_files)
+            confirm = QMessageBox.question(
+                self, "Confirm Delete",
+                f"Are you sure you want to delete {len(selected_files)} files with {total_records} records?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if confirm != QMessageBox.Yes:
+                logger.debug("Deletion canceled by user")
+                return
+            
             self.progress_bar.setVisible(True)
-            self.import_thread = ImportFileThread(fname, self.crm_db_path)
-            self.import_thread.import_completed.connect(self.on_import_completed)
-            self.import_thread.error_occurred.connect(self.on_data_error)
-            self.import_thread.progress_updated.connect(self.progress_bar.setValue)
-            self.import_thread.finished.connect(lambda: self.progress_bar.setVisible(False))
-            self.import_thread.start()
+            self.delete_thread = DeleteFilesThread(self.crm_db_path, selected_files)
+            self.delete_thread.delete_completed.connect(self.on_delete_completed)
+            self.delete_thread.error_occurred.connect(self.on_data_error)
+            self.delete_thread.progress_updated.connect(self.progress_bar.setValue)
+            self.delete_thread.finished.connect(lambda: self.progress_bar.setVisible(False))
+            self.delete_thread.start()
+
+    def on_delete_completed(self):
+        vacuum_db(self.crm_db_path)  # Ensure database is vacuumed after deletion
+        self.load_data_thread()
+        self.status_label.setText("Files deleted successfully")
+        logger.info("Files deleted successfully")
 
     def on_import_completed(self, df):
         self.load_data_thread()
         self.status_label.setText(f"Imported {len(df)} records successfully")
-        logging.info(f"Imported {len(df)} records successfully")
+        logger.info(f"Imported {len(df)} records successfully")
 
     def on_data_loaded(self, crm_df, blank_df):
-        allowed_crms = ['258', '252', '906', '506', '233', '255', '263', '269']
-        crm_df = crm_df[crm_df['norm_crm_id'].isin(allowed_crms)].dropna(subset=['norm_crm_id'])
         self.crm_df = crm_df
         self.blank_df = blank_df
-        logging.info(f"Loaded {len(crm_df)} CRM records and {len(blank_df)} BLANK records after normalization")
+        logger.info(f"Loaded {len(crm_df)} CRM records and {len(blank_df)} BLANK records after normalization")
+        # Ensure file_name column exists
+        if 'file_name' not in crm_df.columns or 'file_name' not in blank_df.columns:
+            logger.error("Missing 'file_name' column in loaded data")
+            self.status_label.setText("Error: Missing 'file_name' column in data")
+            QMessageBox.critical(self, "Error", "Missing 'file_name' column in data")
+            return
         self.populate_filters()
         self.status_label.setText("Data loaded successfully")
 
@@ -580,20 +936,20 @@ class CRMDataVisualizer(QMainWindow):
         self.crm_df = pd.DataFrame()
         self.blank_df = pd.DataFrame()
         self.status_label.setText(error_message)
-        logging.error(error_message)
+        logger.error(error_message)
         QMessageBox.critical(self, "Error", error_message)
         self.populate_filters()
 
     def on_filter_changed(self):
         if self.updating_filters:
             return
-        logging.debug("Filter changed, updating filters")
+        logger.debug("Filter changed, updating filters")
         self.update_filters()
 
     def is_valid_crm_id(self, crm_id):
         norm = normalize_crm_id(crm_id)
-        allowed = ['258', '252', '906', '506', '233', '255', '263', '269']
-        return norm in allowed
+        allowed_crms = ['258', '252', '906', '506', '233', '255', '263', '260']
+        return norm in allowed_crms
 
     def extract_device_name(self, folder_name):
         if not folder_name or not isinstance(folder_name, str):
@@ -605,8 +961,8 @@ class CRMDataVisualizer(QMainWindow):
         return None
 
     def populate_filters(self):
-        if self.crm_df.empty:
-            logging.warning("No CRM data available to populate filters")
+        if self.crm_df.empty and self.blank_df.empty:
+            logger.warning("No data available to populate filters")
             return
 
         self.device_combo.blockSignals(True)
@@ -620,7 +976,8 @@ class CRMDataVisualizer(QMainWindow):
         self.device_combo.addItem("All Devices")
         self.device_combo.addItems(['mass', 'oes 4ac', 'oes fire'])
 
-        elements = sorted(set(el.split()[0] for el in self.crm_df['element'].unique() if isinstance(el, str)))
+        combined_df = pd.concat([self.crm_df, self.blank_df])
+        elements = sorted(set(el.split()[0] for el in combined_df['element'].unique() if isinstance(el, str)))
         crms = sorted(self.crm_df['norm_crm_id'].unique())
 
         self.element_combo.addItem("All Elements")
@@ -640,10 +997,10 @@ class CRMDataVisualizer(QMainWindow):
         self.updating_filters = True
 
         try:
-            if self.crm_df.empty:
+            if self.crm_df.empty and self.blank_df.empty:
                 self.table_widget.setRowCount(0)
-                self.status_label.setText("No CRM data available")
-                logging.warning("No CRM data available for filtering")
+                self.status_label.setText("No data available")
+                logger.warning("No data available for filtering")
                 self.updating_filters = False
                 return
 
@@ -664,7 +1021,7 @@ class CRMDataVisualizer(QMainWindow):
                 'from_date': from_date,
                 'to_date': to_date
             }
-            logging.debug(f"Updating filters: {filters}")
+            logger.debug(f"Updating filters: {filters}")
 
             self.progress_bar.setVisible(True)
             self.filter_thread = FilterThread(self.crm_df, self.blank_df, filters)
@@ -682,22 +1039,18 @@ class CRMDataVisualizer(QMainWindow):
         QApplication.processEvents()
         self.update_table(filtered_crm_df, filtered_blank_df)
         self.status_label.setText(f"Loaded {len(filtered_crm_df)} CRM records, {len(filtered_blank_df)} BLANK records")
-        logging.info(f"Filtered {len(filtered_crm_df)} CRM records and {len(filtered_blank_df)} BLANK records")
+        logger.info(f"Filtered {len(filtered_crm_df)} CRM records and {len(filtered_blank_df)} BLANK records")
 
     def update_table(self, crm_df, blank_df):
-        """Update table widget with both CRM and blank records."""
-        # Combine CRM and blank DataFrames
+        self.table_widget.blockSignals(True)
         combined_df = pd.concat([crm_df, blank_df], ignore_index=True)
-        # Ensure all necessary columns are present
         for col in ['id', 'crm_id', 'solution_label', 'element', 'value', 'file_name', 'folder_name', 'date']:
             if col not in combined_df.columns:
                 combined_df[col] = pd.NA
         combined_df = combined_df.sort_values(['date', 'crm_id', 'element'])
         
-        # Add blank_value column (initially NA)
         combined_df['blank_value'] = pd.NA
         
-        # If blank correction is applied, update values and blank_value
         if self.apply_blank_check.isChecked() and self.element_combo.currentText() != "All Elements" and self.crm_combo.currentText() != "All CRM IDs":
             current_element = self.element_combo.currentText()
             current_crm = self.crm_combo.currentText()
@@ -712,7 +1065,7 @@ class CRMDataVisualizer(QMainWindow):
         self.table_widget.setRowCount(len(combined_df))
         for i, row in combined_df.iterrows():
             QApplication.processEvents()
-            self.table_widget.setItem(i, 0, QTableWidgetItem(str(row['id'])))
+            self.table_widget.setItem(i, 0, QTableWidgetItem(str(row['id']) if pd.notna(row['id']) else ""))
             self.table_widget.setItem(i, 1, QTableWidgetItem(str(row['crm_id'])))
             self.table_widget.setItem(i, 2, QTableWidgetItem(str(row['solution_label'])))
             self.table_widget.setItem(i, 3, QTableWidgetItem(str(row['element'])))
@@ -720,9 +1073,11 @@ class CRMDataVisualizer(QMainWindow):
             self.table_widget.setItem(i, 5, QTableWidgetItem(f"{row['blank_value']:.2f}" if pd.notna(row['blank_value']) else ""))
             self.table_widget.setItem(i, 6, QTableWidgetItem(str(row['file_name'])))
             self.table_widget.setItem(i, 7, QTableWidgetItem(str(row['folder_name'])))
-            self.table_widget.setItem(i, 8, QTableWidgetItem(str(row['date'])))
+            self.table_widget.setItem(i, 8, QTableWidgetItem(str(row['date']) if pd.notna(row['date']) else ""))
         
-        logging.info(f"Updated table with {len(combined_df)} records ({len(crm_df)} CRM, {len(blank_df)} BLANK)")
+        self.status_label.setText(f"Loaded {len(crm_df)} CRM records, {len(blank_df)} BLANK records")
+        logger.info(f"Updated table with {len(combined_df)} records ({len(crm_df)} CRM, {len(blank_df)} BLANK)")
+        self.table_widget.blockSignals(False)
 
     def export_table(self):
         if self.plot_df_cache is None or self.plot_df_cache.empty:
@@ -731,21 +1086,21 @@ class CRMDataVisualizer(QMainWindow):
         fname, _ = QFileDialog.getSaveFileName(self, "Save CSV", "", "CSV (*.csv)")
         if fname:
             try:
-                self.plot_df_cache.to_csv(fname, index=False)
+                self.plot_df_cache.to_csv(fname, index=False, encoding='utf-8')
                 self.status_label.setText("Table exported successfully")
-                logging.info(f"Table exported to {fname}")
+                logger.info(f"Table exported to {fname}")
             except Exception as e:
-                logging.error(f"Error exporting table: {str(e)}")
+                logger.error(f"Error exporting table: {str(e)}")
                 QMessageBox.critical(self, "Error", f"Failed to export table: {str(e)}")
 
     def get_verification_value(self, crm_id, element):
         cache_key = f"{crm_id}_{element}"
         if cache_key in self.verification_cache:
-            logging.debug(f"Retrieved verification value from cache for {cache_key}: {self.verification_cache[cache_key]}")
+            logger.debug(f"Retrieved verification value from cache for {cache_key}: {self.verification_cache[cache_key]}")
             return self.verification_cache[cache_key]
 
         if not self.is_valid_crm_id(crm_id):
-            logging.warning(f"Invalid CRM ID format: {crm_id}")
+            logger.warning(f"Invalid CRM ID format: {crm_id}")
             self.verification_cache[cache_key] = None
             return None
 
@@ -756,7 +1111,7 @@ class CRMDataVisualizer(QMainWindow):
             tables = [row[0] for row in cursor.fetchall()]
             table_name = "oreas_hs j" if re.match(r'(?i)oreas', crm_id) else "pivot_crm"
             if table_name not in tables:
-                logging.error(f"Table {table_name} does not exist in database")
+                logger.error(f"Table {table_name} does not exist in database")
                 conn.close()
                 QMessageBox.critical(self, "Error", f"Table {table_name} does not exist")
                 self.verification_cache[cache_key] = None
@@ -765,7 +1120,7 @@ class CRMDataVisualizer(QMainWindow):
             cursor.execute(f"PRAGMA table_info({table_name})")
             cols = [x[1] for x in cursor.fetchall()]
             if 'CRM ID' not in cols:
-                logging.error(f"Column 'CRM ID' not found in {table_name}")
+                logger.error(f"Column 'CRM ID' not found in {table_name}")
                 conn.close()
                 QMessageBox.critical(self, "Error", f"Column 'CRM ID' not found")
                 self.verification_cache[cache_key] = None
@@ -780,7 +1135,7 @@ class CRMDataVisualizer(QMainWindow):
             crm_data = cursor.fetchall()
 
             if not crm_data:
-                logging.warning(f"No CRM data found for {crm_id}")
+                logger.warning(f"No CRM data found for {crm_id}")
                 conn.close()
                 self.verification_cache[cache_key] = None
                 return None
@@ -794,17 +1149,17 @@ class CRMDataVisualizer(QMainWindow):
                         try:
                             value = float(value)
                             self.verification_cache[cache_key] = value
-                            logging.debug(f"Verification value for CRM {crm_id}, Element {element}: {value}")
+                            logger.debug(f"Verification value for CRM {crm_id}, Element {element}: {value}")
                             return value
                         except (ValueError, TypeError):
-                            logging.warning(f"Invalid value for {target_element}: {value}")
+                            logger.warning(f"Invalid value for {target_element}: {value}")
                             continue
 
-            logging.warning(f"No valid value for {target_element} in {table_name}")
+            logger.warning(f"No valid value for {target_element} in {table_name}")
             self.verification_cache[cache_key] = None
             return None
         except Exception as e:
-            logging.error(f"Error querying database: {str(e)}")
+            logger.error(f"Error querying database: {str(e)}")
             QMessageBox.critical(self, "Error", f"Error querying database: {str(e)}")
             self.verification_cache[cache_key] = None
             return None
@@ -813,7 +1168,6 @@ class CRMDataVisualizer(QMainWindow):
                 conn.close()
 
     def select_best_blank(self, crm_row, blank_df, ver_value):
-        """Select the blank value that minimizes the difference between corrected CRM value and verification value."""
         if blank_df.empty or ver_value is None:
             logger.debug(f"No blank correction applied: empty blank_df={blank_df.empty}, ver_value={ver_value}")
             return None, crm_row['value']
@@ -860,9 +1214,9 @@ class CRMDataVisualizer(QMainWindow):
         filtered_crm_df = self.filtered_crm_df_cache if self.filtered_crm_df_cache is not None else self.crm_df
         filtered_blank_df = self.filtered_blank_df_cache if self.filtered_blank_df_cache is not None else self.blank_df
 
-        if filtered_crm_df.empty:
-            self.status_label.setText("No CRM data to plot")
-            logging.info("No CRM data to plot due to empty filtered dataframe")
+        if filtered_crm_df.empty and filtered_blank_df.empty:
+            self.status_label.setText("No data to plot")
+            logger.info("No data to plot due to empty filtered dataframes")
             self.plot_df_cache = pd.DataFrame()
             self.update_table(filtered_crm_df, filtered_blank_df)
             return
@@ -871,24 +1225,24 @@ class CRMDataVisualizer(QMainWindow):
         if validate_percentage(self.percentage_edit.text()):
             percentage = float(self.percentage_edit.text())
         else:
-            logging.warning(f"Invalid percentage value: {self.percentage_edit.text()}, using default 10%")
+            logger.warning(f"Invalid percentage value: {self.percentage_edit.text()}, using default 10%")
             self.percentage_edit.setText("10")
 
         filtered_crm_df = filtered_crm_df.sort_values('date')
-        current_element = self.element_combo.currentText()
-        current_crm = self.crm_combo.currentText()
         colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEEAD', '#D4A5A5', '#9B59B6']
         plot_df = pd.DataFrame()
+        plotted_records = 0
 
-        crm_ids = [current_crm] if current_crm != "All CRM IDs" else filtered_crm_df['norm_crm_id'].unique()
-        logging.debug(f"Plotting for CRM IDs: {crm_ids}")
+        crm_ids = [self.crm_combo.currentText()] if self.crm_combo.currentText() != "All CRM IDs" else filtered_crm_df['norm_crm_id'].unique()
+        logger.debug(f"Plotting for CRM IDs: {crm_ids}")
 
         for idx, crm_id in enumerate(crm_ids):
             crm_df = filtered_crm_df[filtered_crm_df['norm_crm_id'] == crm_id]
             if crm_df.empty:
-                logging.debug(f"No data for CRM ID {crm_id}")
+                logger.debug(f"No data for CRM ID {crm_id}")
                 continue
 
+            current_element = self.element_combo.currentText()
             ver_value = self.get_verification_value(crm_id, current_element) if current_element != "All Elements" else None
 
             if current_element != "All Elements" and self.best_wl_check.isChecked() and ver_value is not None:
@@ -897,7 +1251,7 @@ class CRMDataVisualizer(QMainWindow):
                     return group.loc[group['diff'].idxmin()]
                 crm_df = crm_df.groupby(['year', 'month', 'day']).apply(select_best).reset_index(drop=True)
 
-            if self.apply_blank_check.isChecked() and current_element != "All Elements" and current_crm != "All CRM IDs" and ver_value is not None:
+            if self.apply_blank_check.isChecked() and current_element != "All Elements" and self.crm_combo.currentText() != "All CRM IDs" and ver_value is not None:
                 crm_df = crm_df.copy()
                 crm_df['original_value'] = crm_df['value']
                 crm_df['blank_value'] = pd.NA
@@ -909,14 +1263,15 @@ class CRMDataVisualizer(QMainWindow):
             indices = np.arange(len(crm_df))
             values = crm_df['value'].values
             date_labels = [d for d in crm_df['date']]
-            logging.debug(f"CRM {crm_id}: {len(indices)} points, values range: {min(values, default=0):.2f} - {max(values, default=0):.2f}")
+            logger.debug(f"CRM {crm_id}: {len(indices)} points, values range: {min(values, default=0):.2f} - {max(values, default=0):.2f}")
 
             pen = mkPen(color=colors[idx % len(colors)], width=2)
             plot_item = self.plot_widget.plot(indices, values, pen=pen, symbol='o', symbolSize=8, name=f"CRM {crm_id}")
             self.plot_data_items.append((plot_item, crm_df, indices, date_labels))
-            logging.debug(f"Plotted {len(crm_df)} points for CRM ID {crm_id}")
+            logger.debug(f"Plotted {len(crm_df)} points for CRM ID {crm_id}")
+            plotted_records += len(crm_df)
 
-            if current_element != "All Elements" and current_crm != "All CRM IDs":
+            if current_element != "All Elements" and self.crm_combo.currentText() != "All CRM IDs":
                 ver_value = self.get_verification_value(crm_id, current_element)
                 if ver_value is not None and not pd.isna(ver_value):
                     x_range = [0, max(indices, default=0)]
@@ -928,26 +1283,74 @@ class CRMDataVisualizer(QMainWindow):
                     self.plot_widget.plot(x_range, [ver_value + delta] * 2, pen=mkPen('#45B7D1', width=1, style=Qt.DotLine), name="1LS")
                     self.plot_widget.plot(x_range, [ver_value + 2 * delta] * 2, pen=mkPen('#45B7D1', width=1, style=Qt.DotLine), name="2LS")
                     self.plot_widget.plot(x_range, [ver_value * (1 + percentage / 100)] * 2, pen=mkPen('#FF6B6B', width=2, style=Qt.DotLine), name="UCL")
-                    logging.info(f"Plotted control lines for CRM {crm_id}, Element {current_element}")
+                    logger.info(f"Plotted control lines for CRM {crm_id}, Element {current_element}")
 
-        self.plot_df_cache = pd.concat([plot_df, crm_df], ignore_index=True) if not crm_df.empty else plot_df
+            plot_df = pd.concat([plot_df, crm_df], ignore_index=True)
+
+        self.plot_df_cache = plot_df
+        if plotted_records == 0:
+            self.status_label.setText("No data to plot")
+            logger.info("No data plotted")
+        else:
+            self.status_label.setText(f"Plotted {plotted_records} records")
+            logger.info(f"Plotted {plotted_records} records")
         self.update_table(filtered_crm_df, filtered_blank_df)
-        self.plot_widget.showGrid(x=True, y=True)
-        self.status_label.setText(f"Plotted {len(self.plot_df_cache)} records")
-        logging.info(f"Plotted {len(self.plot_df_cache)} records")
+
+    def edit_record(self):
+        selected = self.table_widget.currentRow()
+        if selected < 0:
+            QMessageBox.warning(self, "Warning", "Please select a record to edit")
+            return
+        
+        all_df = pd.concat([self.filtered_crm_df_cache, self.filtered_blank_df_cache])
+        if all_df.empty or selected >= len(all_df):
+            QMessageBox.warning(self, "Warning", "No valid record selected")
+            return
+        
+        record = all_df.iloc[selected]
+        dialog = EditRecordDialog(self, record, self.crm_db_path)
+        if dialog.exec_() == QDialog.Accepted:
+            updated_record = dialog.get_updated_record()
+            try:
+                conn = sqlite3.connect(self.crm_db_path)
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    UPDATE crm_data
+                    SET crm_id = ?, solution_label = ?, element = ?, value = ?, date = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        updated_record['crm_id'],
+                        updated_record['solution_label'],
+                        updated_record['element'],
+                        updated_record['value'],
+                        updated_record['date'],
+                        record['id']
+                    )
+                )
+                conn.commit()
+                conn.close()
+                vacuum_db(self.crm_db_path)  # Vacuum database after update
+                logger.info(f"Updated record ID {record['id']} with new values: {updated_record}")
+                self.load_data_thread()
+                self.status_label.setText("Record updated successfully")
+            except Exception as e:
+                logger.error(f"Error updating record: {str(e)}")
+                QMessageBox.critical(self, "Error", f"Failed to update record: {str(e)}")
 
     def on_mouse_clicked(self, event):
         if event.button() == Qt.LeftButton:
             pos = self.plot_widget.getViewBox().mapSceneToView(event.scenePos())
             x, y = pos.x(), pos.y()
-            logging.debug(f"Click at view coordinates: x={x:.2f}, y={y:.2f}")
+            logger.debug(f"Click at view coordinates: x={x:.2f}, y={y:.2f}")
             closest_dist = float('inf')
             closest_info = None
 
             for plot_item, crm_df, indices, date_labels in self.plot_data_items:
                 for i, (idx, value, date) in enumerate(zip(indices, crm_df['value'], date_labels)):
                     dist = ((idx - x) ** 2 + (value - y) ** 2) ** 0.5
-                    logging.debug(f"Point {i}: index={idx}, value={value:.2f}, dist={dist:.2f}")
+                    logger.debug(f"Point {i}: index={idx}, value={value:.2f}, dist={dist:.2f}")
                     if dist < 10:
                         closest_dist = dist
                         element = crm_df.iloc[i]['element']
@@ -982,9 +1385,9 @@ class CRMDataVisualizer(QMainWindow):
 
             if closest_info:
                 QMessageBox.information(self, "Point Info", closest_info)
-                logging.debug(f"Clicked point info: {closest_info}")
+                logger.debug(f"Clicked point info: {closest_info}")
             else:
-                logging.debug("No point found near click position")
+                logger.debug("No point found near click position")
 
     def on_mouse_moved(self, pos):
         pos = self.plot_widget.getViewBox().mapSceneToView(pos)
@@ -1054,12 +1457,11 @@ class CRMDataVisualizer(QMainWindow):
                 else:
                     im.paste(logo, box)
                 im.save('crm_plot.png')
-                import os
                 os.remove(temp_file)
                 self.status_label.setText("Plot saved as crm_plot.png")
-                logging.info("Plot saved as crm_plot.png")
+                logger.info("Plot saved as crm_plot.png")
         except Exception as e:
-            logging.error(f"Error saving plot: {str(e)}")
+            logger.error(f"Error saving plot: {str(e)}")
             self.status_label.setText("Failed to save plot")
             QMessageBox.critical(self, "Error", f"Failed to save plot: {str(e)}")
 
@@ -1074,7 +1476,7 @@ class CRMDataVisualizer(QMainWindow):
         self.percentage_edit.setText("10")
         self.best_wl_check.setChecked(True)
         self.apply_blank_check.setChecked(False)
-        logging.debug("Filters reset")
+        logger.debug("Filters reset")
         self.update_filters()
 
     def apply_styles(self):
@@ -1125,6 +1527,7 @@ class CRMDataVisualizer(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    sys.stdout.reconfigure(encoding='utf-8')
     window = CRMDataVisualizer()
     window.show()
     sys.exit(app.exec_())
