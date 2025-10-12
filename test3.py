@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
     QFileDialog, QLabel, QDialog, QComboBox, QPushButton, QListWidget, QListWidgetItem, QLineEdit
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QFont, QPixmap
+from PyQt5.QtGui import QFont, QPixmap, QColor
 from pyqtgraph import PlotWidget, mkPen
 from qfluentwidgets import (
     ComboBox, LineEdit, PrimaryPushButton, CheckBox, CardWidget,
@@ -615,74 +615,98 @@ class OutOfRangeFilesDialog(QDialog):
 
 class OutOfRangeTableDialog(QDialog):
     def __init__(self, parent=None, out_df=None):
-            super().__init__(parent)
-            self.setWindowTitle("Out of Range Elements")
-            self.setMinimumSize(800, 500)  # Increased minimum size for better visibility
-            self.setStyleSheet("""
-                QDialog {
-                    background-color: #F5F6FA;
-                    font-family: 'Segoe UI', Arial, sans-serif;
-                }
-                QTableWidget {
-                    background-color: #FFFFFF;
-                    border: 1px solid #E0E0E0;
-                    border-radius: 8px;
-                    gridline-color: #E0E0E0;
-                }
-                QTableWidget::item {
-                    padding: 8px;
-                    color: #000000;
-                }
-                QHeaderView::section {
-                    background-color: #0078D4;
-                    color: #FFFFFF;
-                    border: 1px solid #E0E0E0;
-                    padding: 10px;
-                    font-weight: bold;
-                    font-size: 16px;  /* Increased font size for headers */
-                    font-family: 'Segoe UI';
-                }
-            """)
+        super().__init__(parent)
+        self.setWindowTitle("Out of Range Elements")
+        self.setMinimumSize(800, 500)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #F5F6FA;
+                font-family: 'Segoe UI', Arial, sans-serif;
+            }
+            QTableWidget {
+                background-color: #FFFFFF;
+                border: 1px solid #E0E0E0;
+                border-radius: 8px;
+                gridline-color: #E0E0E0;
+            }
+            QTableWidget::item {
+                padding: 8px;
+            }
+            QHeaderView::section {
+                background-color: #0078D4;
+                color: #FFFFFF;
+                border: 1px solid #E0E0E0;
+                padding: 10px;
+                font-weight: bold;
+                font-size: 16px;
+                font-family: 'Segoe UI';
+            }
+        """)
 
-            self.layout = QVBoxLayout()
-            self.table_widget = QTableWidget()
-            self.table_widget.setColumnCount(6)
-            self.table_widget.setHorizontalHeaderLabels([
-                "Element", "Value", "Corrected Value", "Ref Value", "Out (No Blank)", "Out (With Blank)"
-            ])
+        self.out_df = out_df
+        self.layout = QVBoxLayout()
+        self.table_widget = QTableWidget()
+        self.table_widget.setColumnCount(4)
+        self.table_widget.setHorizontalHeaderLabels([
+            "Element", "Value", "Corrected Value", "Ref Value"
+        ])
 
-            # Enable interactive resizing of columns
-            header = self.table_widget.horizontalHeader()
-            header.setSectionResizeMode(QHeaderView.Interactive)  # Allow user to resize columns
-            header.setMinimumSectionSize(100)  # Minimum column width
-            header.setDefaultSectionSize(150)  # Default column width for better visibility
-            header.setStretchLastSection(True)  # Stretch last column to fill space
-            header.setFont(QFont("Segoe UI", 12, QFont.Bold))  # Bold and larger font for headers
+        header = self.table_widget.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setMinimumSectionSize(100)
+        header.setDefaultSectionSize(150)
+        header.setStretchLastSection(True)
+        header.setFont(QFont("Segoe UI", 12, QFont.Bold))
 
-            # Enable vertical header resizing
-            vertical_header = self.table_widget.verticalHeader()
-            vertical_header.setSectionResizeMode(QHeaderView.Interactive)
-            vertical_header.setDefaultSectionSize(40)  # Default row height
-            vertical_header.setFont(QFont("Segoe UI", 10))
+        vertical_header = self.table_widget.verticalHeader()
+        vertical_header.setSectionResizeMode(QHeaderView.Interactive)
+        vertical_header.setDefaultSectionSize(40)
+        vertical_header.setFont(QFont("Segoe UI", 10))
 
-            # Populate table with data
-            if out_df is not None and not out_df.empty:
-                self.table_widget.setRowCount(len(out_df))
-                for i, row in out_df.iterrows():
-                    self.table_widget.setItem(i, 0, QTableWidgetItem(str(row['element'])))
-                    self.table_widget.setItem(i, 1, QTableWidgetItem(f"{row['value']:.2f}" if pd.notna(row['value']) else ""))
-                    self.table_widget.setItem(i, 2, QTableWidgetItem(f"{row['corrected_value']:.2f}" if pd.notna(row['corrected_value']) else ""))
-                    self.table_widget.setItem(i, 3, QTableWidgetItem(f"{row['ref_value']:.2f}" if pd.notna(row['ref_value']) else ""))
-                    self.table_widget.setItem(i, 4, QTableWidgetItem("Yes" if row['out_no_blank'] else "No"))
-                    self.table_widget.setItem(i, 5, QTableWidgetItem("Yes" if row['out_with_blank'] else "No"))
-            else:
-                self.table_widget.setRowCount(0)
+        if out_df is not None and not out_df.empty:
+            self.table_widget.setRowCount(len(out_df))
+            for i, row in out_df.iterrows():
+                element_item = QTableWidgetItem(str(row['element']))
+                value_item = QTableWidgetItem(f"{row['value']:.2f}" if pd.notna(row['value']) else "")
+                corrected_item = QTableWidgetItem(f"{row['corrected_value']:.2f}" if pd.notna(row['corrected_value']) else "")
+                ref_item = QTableWidgetItem(f"{row['ref_value']:.2f}" if pd.notna(row['ref_value']) else "")
 
-            # Adjust table to content size
-            self.table_widget.resizeColumnsToContents()
+                value_color = QColor('red') if row['out_no_blank'] else QColor('green')
+                corrected_color = QColor('red') if row['out_with_blank'] else QColor('green')
+                value_item.setForeground(value_color)
+                corrected_item.setForeground(corrected_color)
 
-            self.layout.addWidget(self.table_widget)
-            self.setLayout(self.layout)
+                self.table_widget.setItem(i, 0, element_item)
+                self.table_widget.setItem(i, 1, value_item)
+                self.table_widget.setItem(i, 2, corrected_item)
+                self.table_widget.setItem(i, 3, ref_item)
+                # logger.debug(f"Row {i}: out_no_blank={row['out_no_blank']}, out_with_blank={row['out_with_blank']}, value_color={value_color.name()}, corrected_color={corrected_color.name()}")
+        else:
+            self.table_widget.setRowCount(0)
+
+        self.table_widget.resizeColumnsToContents()
+        self.table_widget.update()
+        self.table_widget.repaint()
+
+        self.export_button = QPushButton("Export to CSV")
+        self.export_button.clicked.connect(self.export_to_csv)
+
+        self.layout.addWidget(self.table_widget)
+        self.layout.addWidget(self.export_button)
+        self.setLayout(self.layout)
+
+    def export_to_csv(self):
+        if self.out_df is None or self.out_df.empty:
+            QMessageBox.warning(self, "Warning", "No data to export")
+            return
+
+        fname, _ = QFileDialog.getSaveFileName(self, "Save CSV File", "", "CSV Files (*.csv)")
+        if fname:
+            try:
+                self.out_df.to_csv(fname, index=False, encoding='utf-8')
+                QMessageBox.information(self, "Success", f"Data exported to {fname}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to export: {str(e)}")
 
 class OutOfRangeThread(QThread):
     out_of_range_data = pyqtSignal(pd.DataFrame)
@@ -703,49 +727,49 @@ class OutOfRangeThread(QThread):
             conn = sqlite3.connect(self.db_path)
             df = pd.read_sql_query("SELECT * FROM crm_data WHERE file_name = ?", conn, params=(self.file_name,))
             conn.close()
-            logger.debug(f"Loaded {len(df)} records for file {self.file_name}")
+            # logger.debug(f"Loaded {len(df)} records for file {self.file_name}")
 
             crm_df = df[df['crm_id'] != 'BLANK'].copy()
             blank_df = df[df['crm_id'] == 'BLANK'].copy()
             crm_df['norm_crm_id'] = crm_df['crm_id'].apply(self.normalize_crm_id)
-            logger.debug(f"CRM records: {len(crm_df)}, BLANK records: {len(blank_df)}")
-            logger.debug(f"Unique norm_crm_id: {crm_df['norm_crm_id'].unique().tolist()}")
-            logger.debug(f"Unique elements: {crm_df['element'].unique().tolist()}")
+            # logger.debug(f"CRM records: {len(crm_df)}, BLANK records: {len(blank_df)}")
+            # logger.debug(f"Unique norm_crm_id: {crm_df['norm_crm_id'].unique().tolist()}")
+            # logger.debug(f"Unique elements: {crm_df['element'].unique().tolist()}")
 
             out_df = pd.DataFrame()
             if crm_df.empty:
-                logger.warning(f"No CRM data found for file {self.file_name}")
+                # logger.warning(f"No CRM data found for file {self.file_name}")
                 self.out_of_range_data.emit(out_df)
                 self.progress_updated.emit(100)
                 return
 
             unique_elements = crm_df['element'].unique()
             unique_crms = crm_df['norm_crm_id'].unique()
-            logger.debug(f"Processing {len(unique_crms)} CRM IDs and {len(unique_elements)} elements")
+            # logger.debug(f"Processing {len(unique_crms)} CRM IDs and {len(unique_elements)} elements")
 
             for crm_id in unique_crms:
                 for element in unique_elements:
                     ver_value = self.get_verification_value(crm_id, element)
-                    logger.debug(f"Verification value for CRM {crm_id}, Element {element}: {ver_value}")
+                    # logger.debug(f"Verification value for CRM {crm_id}, Element {element}: {ver_value}")
                     if ver_value is None:
-                        logger.warning(f"No verification value for CRM {crm_id}, Element {element}")
+                        # logger.warning(f"No verification value for CRM {crm_id}, Element {element}")
                         continue
 
                     lcl = ver_value * (1 - self.percentage / 100)
                     ucl = ver_value * (1 + self.percentage / 100)
-                    logger.debug(f"LCL: {lcl:.2f}, UCL: {ucl:.2f} for CRM {crm_id}, Element {element}")
+                    # logger.debug(f"LCL: {lcl:.2f}, UCL: {ucl:.2f} for CRM {crm_id}, Element {element}")
 
                     element_df = crm_df[(crm_df['norm_crm_id'] == crm_id) & (crm_df['element'] == element)]
-                    logger.debug(f"Found {len(element_df)} records for CRM {crm_id}, Element {element}")
+                    # logger.debug(f"Found {len(element_df)} records for CRM {crm_id}, Element {element}")
 
                     for _, row in element_df.iterrows():
                         value = row['value']
                         blank_value, corrected_value = self.select_best_blank(row, blank_df, ver_value)
-                        logger.debug(f"Row ID {row['id']}: value={value:.2f}, blank_value={blank_value}, corrected_value={corrected_value:.2f}")
+                        # logger.debug(f"Row ID {row['id']}: value={value:.2f}, blank_value={blank_value}, corrected_value={corrected_value:.2f}")
 
                         out_no_blank = not (lcl <= value <= ucl)
                         out_with_blank = not (lcl <= corrected_value <= ucl) if blank_value is not None else out_no_blank
-                        logger.debug(f"Out of range check: out_no_blank={out_no_blank}, out_with_blank={out_with_blank}")
+                        # logger.debug(f"Out of range check: out_no_blank={out_no_blank}, out_with_blank={out_with_blank}")
 
                         if out_no_blank or out_with_blank:
                             new_row = {
@@ -759,7 +783,7 @@ class OutOfRangeThread(QThread):
                             out_df = pd.concat([out_df, pd.DataFrame([new_row])], ignore_index=True)
                             logger.info(f"Added out-of-range record: {new_row}")
 
-            logger.debug(f"Out-of-range DataFrame size: {len(out_df)}")
+            # logger.debug(f"Out-of-range DataFrame size: {len(out_df)}")
             self.progress_updated.emit(100)
             self.out_of_range_data.emit(out_df)
         except Exception as e:
@@ -908,9 +932,11 @@ class OutOfRangeThread(QThread):
                     continue
 
         if best_blank_value is not None:
-            logger.info(f"Selected blank value {best_blank_value:.2f} for CRM row {crm_row['id']}, corrected value={corrected_value:.2f}, diff={best_diff:.2f}")
+            pass
+            # logger.info(f"Selected blank value {best_blank_value:.2f} for CRM row {crm_row['id']}, corrected value={corrected_value:.2f}, diff={best_diff:.2f}")
         else:
-            logger.debug(f"No valid blank value selected for CRM row {crm_row['id']}, using original value={crm_row['value']:.2f}")
+            pass
+            # logger.debug(f"No valid blank value selected for CRM row {crm_row['id']}, using original value={crm_row['value']:.2f}")
 
         return best_blank_value, corrected_value
 class CRMDataVisualizer(QMainWindow):
@@ -1504,8 +1530,8 @@ class CRMDataVisualizer(QMainWindow):
                 try:
                     corrected = crm_row['value'] - blank_value
                     new_diff = abs(ver_value - corrected)
-                    print(corrected,ver_value,blank_value)
-                    logger.debug(f"Blank: solution_label={blank_row['solution_label']}, value={blank_value}, corrected={corrected}, new_diff={new_diff}, initial_diff={initial_diff}")
+                    # print(corrected,ver_value,blank_value)
+                    # logger.debug(f"Blank: solution_label={blank_row['solution_label']}, value={blank_value}, corrected={corrected}, new_diff={new_diff}, initial_diff={initial_diff}")
                     if new_diff < initial_diff:
                         best_diff = new_diff
                         best_blank_value = blank_value
