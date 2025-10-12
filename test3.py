@@ -646,9 +646,9 @@ class OutOfRangeTableDialog(QDialog):
         self.out_df = out_df
         self.layout = QVBoxLayout()
         self.table_widget = QTableWidget()
-        self.table_widget.setColumnCount(4)
+        self.table_widget.setColumnCount(5)  # Increased column count to include CRM ID
         self.table_widget.setHorizontalHeaderLabels([
-            "Element", "Value", "Corrected Value", "Ref Value"
+            "CRM ID", "Element", "Value", "Corrected Value", "Ref Value"
         ])
 
         header = self.table_widget.horizontalHeader()
@@ -666,21 +666,22 @@ class OutOfRangeTableDialog(QDialog):
         if out_df is not None and not out_df.empty:
             self.table_widget.setRowCount(len(out_df))
             for i, row in out_df.iterrows():
-                element_item = QTableWidgetItem(str(row['element']))
+                crm_id_item = QTableWidgetItem(str(row['crm_id']) if pd.notna(row['crm_id']) else "")
+                element_item = QTableWidgetItem(str(row['element']) if pd.notna(row['element']) else "")
                 value_item = QTableWidgetItem(f"{row['value']:.2f}" if pd.notna(row['value']) else "")
                 corrected_item = QTableWidgetItem(f"{row['corrected_value']:.2f}" if pd.notna(row['corrected_value']) else "")
-                ref_item = QTableWidgetItem(f"{row['ref_value']:.2f}" if pd.notna(row['ref_value']) else "")
+                ref_item = QTableWidgetItem(f"{row['ref_value']:.3f}" if pd.notna(row['ref_value']) else "")  # Updated to 3 decimal places
 
                 value_color = QColor('red') if row['out_no_blank'] else QColor('green')
                 corrected_color = QColor('red') if row['out_with_blank'] else QColor('green')
                 value_item.setForeground(value_color)
                 corrected_item.setForeground(corrected_color)
 
-                self.table_widget.setItem(i, 0, element_item)
-                self.table_widget.setItem(i, 1, value_item)
-                self.table_widget.setItem(i, 2, corrected_item)
-                self.table_widget.setItem(i, 3, ref_item)
-                # logger.debug(f"Row {i}: out_no_blank={row['out_no_blank']}, out_with_blank={row['out_with_blank']}, value_color={value_color.name()}, corrected_color={corrected_color.name()}")
+                self.table_widget.setItem(i, 0, crm_id_item)
+                self.table_widget.setItem(i, 1, element_item)
+                self.table_widget.setItem(i, 2, value_item)
+                self.table_widget.setItem(i, 3, corrected_item)
+                self.table_widget.setItem(i, 4, ref_item)
         else:
             self.table_widget.setRowCount(0)
 
@@ -708,6 +709,14 @@ class OutOfRangeTableDialog(QDialog):
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to export: {str(e)}")
 
+from PyQt5.QtCore import QThread, pyqtSignal
+import pandas as pd
+import sqlite3
+import re
+import logging
+
+logger = logging.getLogger()
+
 class OutOfRangeThread(QThread):
     out_of_range_data = pyqtSignal(pd.DataFrame)
     progress_updated = pyqtSignal(int)
@@ -727,52 +736,42 @@ class OutOfRangeThread(QThread):
             conn = sqlite3.connect(self.db_path)
             df = pd.read_sql_query("SELECT * FROM crm_data WHERE file_name = ?", conn, params=(self.file_name,))
             conn.close()
-            # logger.debug(f"Loaded {len(df)} records for file {self.file_name}")
 
             crm_df = df[df['crm_id'] != 'BLANK'].copy()
             blank_df = df[df['crm_id'] == 'BLANK'].copy()
             crm_df['norm_crm_id'] = crm_df['crm_id'].apply(self.normalize_crm_id)
-            # logger.debug(f"CRM records: {len(crm_df)}, BLANK records: {len(blank_df)}")
-            # logger.debug(f"Unique norm_crm_id: {crm_df['norm_crm_id'].unique().tolist()}")
-            # logger.debug(f"Unique elements: {crm_df['element'].unique().tolist()}")
 
             out_df = pd.DataFrame()
             if crm_df.empty:
-                # logger.warning(f"No CRM data found for file {self.file_name}")
+                logger.warning(f"No CRM data found for file {self.file_name}")
                 self.out_of_range_data.emit(out_df)
                 self.progress_updated.emit(100)
                 return
 
             unique_elements = crm_df['element'].unique()
             unique_crms = crm_df['norm_crm_id'].unique()
-            # logger.debug(f"Processing {len(unique_crms)} CRM IDs and {len(unique_elements)} elements")
 
             for crm_id in unique_crms:
                 for element in unique_elements:
                     ver_value = self.get_verification_value(crm_id, element)
-                    # logger.debug(f"Verification value for CRM {crm_id}, Element {element}: {ver_value}")
                     if ver_value is None:
-                        # logger.warning(f"No verification value for CRM {crm_id}, Element {element}")
                         continue
 
                     lcl = ver_value * (1 - self.percentage / 100)
                     ucl = ver_value * (1 + self.percentage / 100)
-                    # logger.debug(f"LCL: {lcl:.2f}, UCL: {ucl:.2f} for CRM {crm_id}, Element {element}")
 
                     element_df = crm_df[(crm_df['norm_crm_id'] == crm_id) & (crm_df['element'] == element)]
-                    # logger.debug(f"Found {len(element_df)} records for CRM {crm_id}, Element {element}")
 
                     for _, row in element_df.iterrows():
                         value = row['value']
                         blank_value, corrected_value = self.select_best_blank(row, blank_df, ver_value)
-                        # logger.debug(f"Row ID {row['id']}: value={value:.2f}, blank_value={blank_value}, corrected_value={corrected_value:.2f}")
 
                         out_no_blank = not (lcl <= value <= ucl)
                         out_with_blank = not (lcl <= corrected_value <= ucl) if blank_value is not None else out_no_blank
-                        # logger.debug(f"Out of range check: out_no_blank={out_no_blank}, out_with_blank={out_with_blank}")
 
                         if out_no_blank or out_with_blank:
                             new_row = {
+                                'crm_id': row['crm_id'],  # Added crm_id to the output DataFrame
                                 'element': element,
                                 'value': value,
                                 'corrected_value': corrected_value if blank_value is not None else pd.NA,
@@ -783,7 +782,6 @@ class OutOfRangeThread(QThread):
                             out_df = pd.concat([out_df, pd.DataFrame([new_row])], ignore_index=True)
                             logger.info(f"Added out-of-range record: {new_row}")
 
-            # logger.debug(f"Out-of-range DataFrame size: {len(out_df)}")
             self.progress_updated.emit(100)
             self.out_of_range_data.emit(out_df)
         except Exception as e:
@@ -825,7 +823,6 @@ class OutOfRangeThread(QThread):
             cursor = conn.cursor()
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
             tables = [row[0] for row in cursor.fetchall()]
-            logger.debug(f"Available tables in ver_db: {tables}")
             table_name = "oreas_hs j" if re.match(r'(?i)oreas', crm_id) else "pivot_crm"
             if table_name not in tables:
                 logger.error(f"Table {table_name} does not exist in database")
@@ -835,7 +832,6 @@ class OutOfRangeThread(QThread):
 
             cursor.execute(f"PRAGMA table_info({table_name})")
             cols = [x[1] for x in cursor.fetchall()]
-            # logger.debug(f"Columns in {table_name}: {cols}")
             if 'CRM ID' not in cols:
                 logger.error(f"Column 'CRM ID' not found in {table_name}")
                 conn.close()
@@ -844,13 +840,11 @@ class OutOfRangeThread(QThread):
 
             element_base = element.split()[0] if ' ' in element else element
             target_element = element if element in cols else element_base
-            logger.debug(f"Target element: {target_element}")
             m = re.search(r'(?i)(?:CRM|OREAS)?\s*(\w+)(?:\s*par)?', crm_id)
             crm_id_part = m.group(1) if m else crm_id
             query = f"SELECT * FROM {table_name} WHERE [CRM ID] LIKE ?"
             cursor.execute(query, (f"%{crm_id_part}%",))
             crm_data = cursor.fetchall()
-            logger.debug(f"Found {len(crm_data)} rows for CRM ID pattern {crm_id_part}")
 
             if not crm_data:
                 logger.warning(f"No CRM data found for {crm_id}")
@@ -868,7 +862,6 @@ class OutOfRangeThread(QThread):
                             value = float(value)
                             self.verification_cache[cache_key] = value
                             logger.debug(f"Verification value for CRM {crm_id}, Element {element}: {value}")
-                            conn.close()
                             return value
                         except (ValueError, TypeError):
                             logger.warning(f"Invalid value for {target_element}: {value}")
@@ -876,7 +869,6 @@ class OutOfRangeThread(QThread):
 
             logger.warning(f"No valid value for {target_element} in {table_name}")
             self.verification_cache[cache_key] = None
-            conn.close()
             return None
         except Exception as e:
             logger.error(f"Error querying verification database: {str(e)}")
@@ -896,7 +888,6 @@ class OutOfRangeThread(QThread):
             (blank_df['folder_name'] == crm_row['folder_name']) &
             (blank_df['element'] == crm_row['element'])
         ]
-        logger.debug(f"Found {len(relevant_blanks)} relevant blanks for CRM row {crm_row['id']}")
 
         if relevant_blanks.empty:
             logger.debug(f"No relevant blanks found for CRM: file={crm_row['file_name']}, folder={crm_row['folder_name']}, element={crm_row['element']}")
@@ -904,8 +895,6 @@ class OutOfRangeThread(QThread):
 
         blank_valid_pattern = re.compile(r'^(?:CRM\s*)?(?:BLANK|BLNK|Blank|blnk|blank)(?:\s*[a-zA-Z]{1,2})?$', re.IGNORECASE)
         valid_blanks = relevant_blanks[relevant_blanks['solution_label'].apply(lambda x: bool(blank_valid_pattern.match(str(x).strip())))]
-        # logger.debug(f"Found {len(valid_blanks)} valid blanks for CRM row {crm_row['id']}")
-        # logger.debug(f"Valid blank solution labels: {valid_blanks['solution_label'].tolist()}")
 
         if valid_blanks.empty:
             logger.debug(f"No valid blanks found for CRM row {crm_row['id']}")
@@ -932,13 +921,12 @@ class OutOfRangeThread(QThread):
                     continue
 
         if best_blank_value is not None:
-            pass
-            # logger.info(f"Selected blank value {best_blank_value:.2f} for CRM row {crm_row['id']}, corrected value={corrected_value:.2f}, diff={best_diff:.2f}")
+            logger.info(f"Selected blank value {best_blank_value:.2f} for CRM row {crm_row['id']}, corrected value={corrected_value:.2f}, diff={best_diff:.2f}")
         else:
-            pass
-            # logger.debug(f"No valid blank value selected for CRM row {crm_row['id']}, using original value={crm_row['value']:.2f}")
+            logger.debug(f"No valid blank value selected for CRM row {crm_row['id']}, using original value={crm_row['value']:.2f}")
 
         return best_blank_value, corrected_value
+    
 class CRMDataVisualizer(QMainWindow):
     def __init__(self):
         super().__init__()
