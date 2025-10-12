@@ -572,6 +572,347 @@ class FilterThread(QThread):
         logger.debug(f"Filtered {len(filtered_crm_df)} CRM records and {len(filtered_blank_df)} BLANK records")
         self.filtered_data.emit(filtered_crm_df, filtered_blank_df)
 
+class OutOfRangeFilesDialog(QDialog):
+    def __init__(self, parent=None, file_names=[], db_path=None, percentage=10.0, ver_db_path=None):
+        super().__init__(parent)
+        self.setWindowTitle("Out of Range Elements")
+        self.setFixedSize(400, 400)
+        self.db_path = db_path
+        self.ver_db_path = ver_db_path
+        self.percentage = percentage
+        
+        self.layout = QVBoxLayout()
+        self.label = QLabel("Select a file to view out-of-range elements:")
+        self.file_list = QListWidget()
+        
+        for file_name in sorted(set(file_names)):
+            item = QListWidgetItem(file_name)
+            item.setData(Qt.UserRole, file_name)
+            self.file_list.addItem(item)
+        
+        self.layout.addWidget(self.label)
+        self.layout.addWidget(self.file_list)
+        self.setLayout(self.layout)
+        
+        self.file_list.itemClicked.connect(self.on_file_clicked)
+
+    def on_file_clicked(self, item):
+        file_name = item.data(Qt.UserRole)
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setVisible(True)
+        self.layout.addWidget(self.progress_bar)
+        
+        self.out_of_range_thread = OutOfRangeThread(self.db_path, file_name, self.percentage, self.ver_db_path)
+        self.out_of_range_thread.out_of_range_data.connect(self.on_out_of_range_data)
+        self.out_of_range_thread.progress_updated.connect(self.progress_bar.setValue)
+        self.out_of_range_thread.finished.connect(lambda: self.progress_bar.setVisible(False))
+        self.out_of_range_thread.start()
+
+    def on_out_of_range_data(self, out_df):
+        dialog = OutOfRangeTableDialog(self, out_df)
+        dialog.exec_()
+
+class OutOfRangeTableDialog(QDialog):
+    def __init__(self, parent=None, out_df=None):
+            super().__init__(parent)
+            self.setWindowTitle("Out of Range Elements")
+            self.setMinimumSize(800, 500)  # Increased minimum size for better visibility
+            self.setStyleSheet("""
+                QDialog {
+                    background-color: #F5F6FA;
+                    font-family: 'Segoe UI', Arial, sans-serif;
+                }
+                QTableWidget {
+                    background-color: #FFFFFF;
+                    border: 1px solid #E0E0E0;
+                    border-radius: 8px;
+                    gridline-color: #E0E0E0;
+                }
+                QTableWidget::item {
+                    padding: 8px;
+                    color: #000000;
+                }
+                QHeaderView::section {
+                    background-color: #0078D4;
+                    color: #FFFFFF;
+                    border: 1px solid #E0E0E0;
+                    padding: 10px;
+                    font-weight: bold;
+                    font-size: 16px;  /* Increased font size for headers */
+                    font-family: 'Segoe UI';
+                }
+            """)
+
+            self.layout = QVBoxLayout()
+            self.table_widget = QTableWidget()
+            self.table_widget.setColumnCount(6)
+            self.table_widget.setHorizontalHeaderLabels([
+                "Element", "Value", "Corrected Value", "Ref Value", "Out (No Blank)", "Out (With Blank)"
+            ])
+
+            # Enable interactive resizing of columns
+            header = self.table_widget.horizontalHeader()
+            header.setSectionResizeMode(QHeaderView.Interactive)  # Allow user to resize columns
+            header.setMinimumSectionSize(100)  # Minimum column width
+            header.setDefaultSectionSize(150)  # Default column width for better visibility
+            header.setStretchLastSection(True)  # Stretch last column to fill space
+            header.setFont(QFont("Segoe UI", 12, QFont.Bold))  # Bold and larger font for headers
+
+            # Enable vertical header resizing
+            vertical_header = self.table_widget.verticalHeader()
+            vertical_header.setSectionResizeMode(QHeaderView.Interactive)
+            vertical_header.setDefaultSectionSize(40)  # Default row height
+            vertical_header.setFont(QFont("Segoe UI", 10))
+
+            # Populate table with data
+            if out_df is not None and not out_df.empty:
+                self.table_widget.setRowCount(len(out_df))
+                for i, row in out_df.iterrows():
+                    self.table_widget.setItem(i, 0, QTableWidgetItem(str(row['element'])))
+                    self.table_widget.setItem(i, 1, QTableWidgetItem(f"{row['value']:.2f}" if pd.notna(row['value']) else ""))
+                    self.table_widget.setItem(i, 2, QTableWidgetItem(f"{row['corrected_value']:.2f}" if pd.notna(row['corrected_value']) else ""))
+                    self.table_widget.setItem(i, 3, QTableWidgetItem(f"{row['ref_value']:.2f}" if pd.notna(row['ref_value']) else ""))
+                    self.table_widget.setItem(i, 4, QTableWidgetItem("Yes" if row['out_no_blank'] else "No"))
+                    self.table_widget.setItem(i, 5, QTableWidgetItem("Yes" if row['out_with_blank'] else "No"))
+            else:
+                self.table_widget.setRowCount(0)
+
+            # Adjust table to content size
+            self.table_widget.resizeColumnsToContents()
+
+            self.layout.addWidget(self.table_widget)
+            self.setLayout(self.layout)
+
+class OutOfRangeThread(QThread):
+    out_of_range_data = pyqtSignal(pd.DataFrame)
+    progress_updated = pyqtSignal(int)
+
+    def __init__(self, db_path, file_name, percentage, ver_db_path):
+        super().__init__()
+        self.db_path = db_path
+        self.file_name = file_name
+        self.percentage = percentage
+        self.ver_db_path = ver_db_path
+        self.verification_cache = {}  # Initialize verification cache
+
+    def run(self):
+        try:
+            self.progress_updated.emit(20)
+            logger.info(f"Starting OutOfRangeThread for file: {self.file_name}")
+            conn = sqlite3.connect(self.db_path)
+            df = pd.read_sql_query("SELECT * FROM crm_data WHERE file_name = ?", conn, params=(self.file_name,))
+            conn.close()
+            logger.debug(f"Loaded {len(df)} records for file {self.file_name}")
+
+            crm_df = df[df['crm_id'] != 'BLANK'].copy()
+            blank_df = df[df['crm_id'] == 'BLANK'].copy()
+            crm_df['norm_crm_id'] = crm_df['crm_id'].apply(self.normalize_crm_id)
+            logger.debug(f"CRM records: {len(crm_df)}, BLANK records: {len(blank_df)}")
+            logger.debug(f"Unique norm_crm_id: {crm_df['norm_crm_id'].unique().tolist()}")
+            logger.debug(f"Unique elements: {crm_df['element'].unique().tolist()}")
+
+            out_df = pd.DataFrame()
+            if crm_df.empty:
+                logger.warning(f"No CRM data found for file {self.file_name}")
+                self.out_of_range_data.emit(out_df)
+                self.progress_updated.emit(100)
+                return
+
+            unique_elements = crm_df['element'].unique()
+            unique_crms = crm_df['norm_crm_id'].unique()
+            logger.debug(f"Processing {len(unique_crms)} CRM IDs and {len(unique_elements)} elements")
+
+            for crm_id in unique_crms:
+                for element in unique_elements:
+                    ver_value = self.get_verification_value(crm_id, element)
+                    logger.debug(f"Verification value for CRM {crm_id}, Element {element}: {ver_value}")
+                    if ver_value is None:
+                        logger.warning(f"No verification value for CRM {crm_id}, Element {element}")
+                        continue
+
+                    lcl = ver_value * (1 - self.percentage / 100)
+                    ucl = ver_value * (1 + self.percentage / 100)
+                    logger.debug(f"LCL: {lcl:.2f}, UCL: {ucl:.2f} for CRM {crm_id}, Element {element}")
+
+                    element_df = crm_df[(crm_df['norm_crm_id'] == crm_id) & (crm_df['element'] == element)]
+                    logger.debug(f"Found {len(element_df)} records for CRM {crm_id}, Element {element}")
+
+                    for _, row in element_df.iterrows():
+                        value = row['value']
+                        blank_value, corrected_value = self.select_best_blank(row, blank_df, ver_value)
+                        logger.debug(f"Row ID {row['id']}: value={value:.2f}, blank_value={blank_value}, corrected_value={corrected_value:.2f}")
+
+                        out_no_blank = not (lcl <= value <= ucl)
+                        out_with_blank = not (lcl <= corrected_value <= ucl) if blank_value is not None else out_no_blank
+                        logger.debug(f"Out of range check: out_no_blank={out_no_blank}, out_with_blank={out_with_blank}")
+
+                        if out_no_blank or out_with_blank:
+                            new_row = {
+                                'element': element,
+                                'value': value,
+                                'corrected_value': corrected_value if blank_value is not None else pd.NA,
+                                'ref_value': ver_value,
+                                'out_no_blank': out_no_blank,
+                                'out_with_blank': out_with_blank
+                            }
+                            out_df = pd.concat([out_df, pd.DataFrame([new_row])], ignore_index=True)
+                            logger.info(f"Added out-of-range record: {new_row}")
+
+            logger.debug(f"Out-of-range DataFrame size: {len(out_df)}")
+            self.progress_updated.emit(100)
+            self.out_of_range_data.emit(out_df)
+        except Exception as e:
+            logger.error(f"Error computing out of range for {self.file_name}: {str(e)}")
+            self.out_of_range_data.emit(pd.DataFrame())
+            self.progress_updated.emit(100)
+
+    def normalize_crm_id(self, crm_id):
+        """Extract numeric part from CRM ID (e.g., 'CRM 258b' → '258')."""
+        if not isinstance(crm_id, str):
+            return None
+        crm_pattern = re.compile(r'^(?:\s*CRM\s*)?(\d{3})(?:\s*[a-zA-Z])?$', re.IGNORECASE)
+        match = crm_pattern.match(crm_id.strip())
+        if match:
+            logger.debug(f"Normalized CRM ID: {crm_id} → {match.group(1)}")
+            return match.group(1)
+        logger.debug(f"Invalid CRM ID format: {crm_id}")
+        return None
+
+    def is_valid_crm_id(self, crm_id):
+        """Check if CRM ID is valid."""
+        norm = self.normalize_crm_id(crm_id)
+        allowed_crms = ['258', '252', '906', '506', '233', '255', '263', '260']
+        return norm in allowed_crms
+
+    def get_verification_value(self, crm_id, element):
+        cache_key = f"{crm_id}_{element}"
+        if cache_key in self.verification_cache:
+            logger.debug(f"Retrieved verification value from cache for {cache_key}: {self.verification_cache[cache_key]}")
+            return self.verification_cache[cache_key]
+
+        if not self.is_valid_crm_id(crm_id):
+            logger.warning(f"Invalid CRM ID format: {crm_id}")
+            self.verification_cache[cache_key] = None
+            return None
+
+        try:
+            conn = sqlite3.connect(self.ver_db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = [row[0] for row in cursor.fetchall()]
+            logger.debug(f"Available tables in ver_db: {tables}")
+            table_name = "oreas_hs j" if re.match(r'(?i)oreas', crm_id) else "pivot_crm"
+            if table_name not in tables:
+                logger.error(f"Table {table_name} does not exist in database")
+                conn.close()
+                self.verification_cache[cache_key] = None
+                return None
+
+            cursor.execute(f"PRAGMA table_info({table_name})")
+            cols = [x[1] for x in cursor.fetchall()]
+            # logger.debug(f"Columns in {table_name}: {cols}")
+            if 'CRM ID' not in cols:
+                logger.error(f"Column 'CRM ID' not found in {table_name}")
+                conn.close()
+                self.verification_cache[cache_key] = None
+                return None
+
+            element_base = element.split()[0] if ' ' in element else element
+            target_element = element if element in cols else element_base
+            logger.debug(f"Target element: {target_element}")
+            m = re.search(r'(?i)(?:CRM|OREAS)?\s*(\w+)(?:\s*par)?', crm_id)
+            crm_id_part = m.group(1) if m else crm_id
+            query = f"SELECT * FROM {table_name} WHERE [CRM ID] LIKE ?"
+            cursor.execute(query, (f"%{crm_id_part}%",))
+            crm_data = cursor.fetchall()
+            logger.debug(f"Found {len(crm_data)} rows for CRM ID pattern {crm_id_part}")
+
+            if not crm_data:
+                logger.warning(f"No CRM data found for {crm_id}")
+                conn.close()
+                self.verification_cache[cache_key] = None
+                return None
+
+            for row in crm_data:
+                row_dict = {cols[i]: row[i] for i in range(len(cols))}
+                label = str(row_dict['CRM ID']).strip().upper()
+                if label.find(crm_id_part.upper()) != -1:
+                    value = row_dict.get(target_element)
+                    if value is not None and not pd.isna(value):
+                        try:
+                            value = float(value)
+                            self.verification_cache[cache_key] = value
+                            logger.debug(f"Verification value for CRM {crm_id}, Element {element}: {value}")
+                            conn.close()
+                            return value
+                        except (ValueError, TypeError):
+                            logger.warning(f"Invalid value for {target_element}: {value}")
+                            continue
+
+            logger.warning(f"No valid value for {target_element} in {table_name}")
+            self.verification_cache[cache_key] = None
+            conn.close()
+            return None
+        except Exception as e:
+            logger.error(f"Error querying verification database: {str(e)}")
+            self.verification_cache[cache_key] = None
+            return None
+        finally:
+            if 'conn' in locals():
+                conn.close()
+
+    def select_best_blank(self, crm_row, blank_df, ver_value):
+        if blank_df.empty or ver_value is None:
+            logger.debug(f"No blank correction applied: empty blank_df={blank_df.empty}, ver_value={ver_value}")
+            return None, crm_row['value']
+
+        relevant_blanks = blank_df[
+            (blank_df['file_name'] == crm_row['file_name']) &
+            (blank_df['folder_name'] == crm_row['folder_name']) &
+            (blank_df['element'] == crm_row['element'])
+        ]
+        logger.debug(f"Found {len(relevant_blanks)} relevant blanks for CRM row {crm_row['id']}")
+
+        if relevant_blanks.empty:
+            logger.debug(f"No relevant blanks found for CRM: file={crm_row['file_name']}, folder={crm_row['folder_name']}, element={crm_row['element']}")
+            return None, crm_row['value']
+
+        blank_valid_pattern = re.compile(r'^(?:CRM\s*)?(?:BLANK|BLNK|Blank|blnk|blank)(?:\s*[a-zA-Z]{1,2})?$', re.IGNORECASE)
+        valid_blanks = relevant_blanks[relevant_blanks['solution_label'].apply(lambda x: bool(blank_valid_pattern.match(str(x).strip())))]
+        # logger.debug(f"Found {len(valid_blanks)} valid blanks for CRM row {crm_row['id']}")
+        # logger.debug(f"Valid blank solution labels: {valid_blanks['solution_label'].tolist()}")
+
+        if valid_blanks.empty:
+            logger.debug(f"No valid blanks found for CRM row {crm_row['id']}")
+            return None, crm_row['value']
+
+        initial_diff = abs(crm_row['value'] - ver_value)
+        best_blank_value = None
+        best_diff = initial_diff
+        corrected_value = crm_row['value']
+
+        for _, blank_row in valid_blanks.iterrows():
+            blank_value = blank_row['value']
+            if pd.notna(blank_value):
+                try:
+                    corrected = crm_row['value'] - blank_value
+                    new_diff = abs(ver_value - corrected)
+                    logger.debug(f"Blank: solution_label={blank_row['solution_label']}, value={blank_value:.2f}, corrected={corrected:.2f}, new_diff={new_diff:.2f}, initial_diff={initial_diff:.2f}")
+                    if new_diff < initial_diff:
+                        best_diff = new_diff
+                        best_blank_value = blank_value
+                        corrected_value = corrected
+                except (TypeError, ValueError) as e:
+                    logger.warning(f"Invalid blank value {blank_value} for CRM row {crm_row['id']}: {str(e)}")
+                    continue
+
+        if best_blank_value is not None:
+            logger.info(f"Selected blank value {best_blank_value:.2f} for CRM row {crm_row['id']}, corrected value={corrected_value:.2f}, diff={best_diff:.2f}")
+        else:
+            logger.debug(f"No valid blank value selected for CRM row {crm_row['id']}, using original value={crm_row['value']:.2f}")
+
+        return best_blank_value, corrected_value
 class CRMDataVisualizer(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -613,12 +954,14 @@ class CRMDataVisualizer(QMainWindow):
         self.export_button = PrimaryPushButton("Export Table", self, FluentIcon.SAVE)
         self.delete_button = PrimaryPushButton("Delete Files", self, FluentIcon.DELETE)
         self.edit_button = PrimaryPushButton("Edit Record", self, FluentIcon.EDIT)
+        self.out_of_range_button = PrimaryPushButton("Out of Range", self, FluentIcon.SEARCH)
         self.save_button = PrimaryPushButton("Save Plot", self, FluentIcon.SAVE)
         self.reset_button = PrimaryPushButton("Reset Filters", self, FluentIcon.SYNC)
         self.button_layout.addWidget(self.import_button)
         self.button_layout.addWidget(self.export_button)
         self.button_layout.addWidget(self.delete_button)
         self.button_layout.addWidget(self.edit_button)
+        self.button_layout.addWidget(self.out_of_range_button)
         self.button_layout.addWidget(self.save_button)
         self.button_layout.addWidget(self.reset_button)
         self.button_layout.addStretch()
@@ -765,7 +1108,7 @@ class CRMDataVisualizer(QMainWindow):
 
         self.table_widget = QTableWidget()
         self.table_widget.setColumnCount(9)
-        self.table_widget.setHorizontalHeaderLabels(["ID", "CRM ID", "Solution Label", "Element", "Value", "Blank Value", "File Name", "Folder Name", "Date"])
+        self.table_widget.setHorizontalHeaderLabels(["ID", "CRM ID", "Solution Label", "Element", "Value", "Blank Value", "File Name", "Date", "Ref Proximity %"])
         self.table_widget.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table_widget.setSelectionMode(QTableWidget.SingleSelection)
         self.table_widget.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -786,6 +1129,7 @@ class CRMDataVisualizer(QMainWindow):
         self.export_button.clicked.connect(self.export_table)
         self.delete_button.clicked.connect(self.delete_files)
         self.edit_button.clicked.connect(self.edit_record)
+        self.out_of_range_button.clicked.connect(self.show_out_of_range_dialog)
         self.plot_button.clicked.connect(self.plot_data)
         self.save_button.clicked.connect(self.save_plot)
         self.reset_button.clicked.connect(self.reset_filters)
@@ -1002,10 +1346,23 @@ class CRMDataVisualizer(QMainWindow):
             self.table_widget.blockSignals(False)
             return
 
-        for col in ['id', 'crm_id', 'solution_label', 'element', 'value', 'blank_value', 'file_name', 'folder_name', 'date']:
+        for col in ['id', 'crm_id', 'solution_label', 'element', 'value', 'blank_value', 'file_name', 'date']:
             if col not in combined_df.columns:
                 combined_df[col] = pd.NA
         combined_df = combined_df.sort_values(['date', 'crm_id', 'element'])
+
+        current_element = self.element_combo.currentText()
+        current_crm = self.crm_combo.currentText()
+        ver_value = None
+        if current_element != "All Elements" and current_crm != "All CRM IDs":
+            ver_value = self.get_verification_value(current_crm, current_element)
+
+        combined_df['ref_proximity'] = pd.NA
+        if ver_value is not None:
+            if self.apply_blank_check.isChecked():
+                combined_df['ref_proximity'] = abs(combined_df['value'] - ver_value) / ver_value * 100 if 'value' in combined_df else pd.NA
+            else:
+                combined_df['ref_proximity'] = abs(combined_df['value'] - ver_value) / ver_value * 100 if 'value' in combined_df else pd.NA
 
         self.table_widget.setRowCount(len(combined_df))
         for i, row in combined_df.iterrows():
@@ -1017,8 +1374,8 @@ class CRMDataVisualizer(QMainWindow):
             self.table_widget.setItem(i, 4, QTableWidgetItem(f"{row['value']:.2f}" if pd.notna(row['value']) else ""))
             self.table_widget.setItem(i, 5, QTableWidgetItem(f"{row['blank_value']:.2f}" if pd.notna(row['blank_value']) else ""))
             self.table_widget.setItem(i, 6, QTableWidgetItem(str(row['file_name'])))
-            self.table_widget.setItem(i, 7, QTableWidgetItem(str(row['folder_name'])))
-            self.table_widget.setItem(i, 8, QTableWidgetItem(str(row['date']) if pd.notna(row['date']) else ""))
+            self.table_widget.setItem(i, 7, QTableWidgetItem(str(row['date']) if pd.notna(row['date']) else ""))
+            self.table_widget.setItem(i, 8, QTableWidgetItem(f"{row['ref_proximity']:.2f}%" if pd.notna(row['ref_proximity']) else ""))
         
         self.status_label.setText(f"Loaded {len(combined_df)} plotted CRM records")
         logger.info(f"Updated table with {len(combined_df)} plotted records")
@@ -1146,7 +1503,7 @@ class CRMDataVisualizer(QMainWindow):
             if pd.notna(blank_value):
                 try:
                     corrected = crm_row['value'] - blank_value
-                    new_diff = abs(ver_value-corrected)
+                    new_diff = abs(ver_value - corrected)
                     print(corrected,ver_value,blank_value)
                     logger.debug(f"Blank: solution_label={blank_row['solution_label']}, value={blank_value}, corrected={corrected}, new_diff={new_diff}, initial_diff={initial_diff}")
                     if new_diff < initial_diff:
@@ -1207,6 +1564,7 @@ class CRMDataVisualizer(QMainWindow):
                     return group.loc[group['diff'].idxmin()]
                 crm_df = crm_df.groupby(['year', 'month', 'day']).apply(select_best).reset_index(drop=True)
 
+            original_df = crm_df.copy()
             if self.apply_blank_check.isChecked() and current_element != "All Elements" and self.crm_combo.currentText() != "All CRM IDs" and ver_value is not None:
                 crm_df = crm_df.copy()
                 crm_df['original_value'] = crm_df['value']
@@ -1218,19 +1576,33 @@ class CRMDataVisualizer(QMainWindow):
 
             indices = np.arange(len(crm_df))
             values = crm_df['value'].values
+            original_values = original_df['value'].values if self.apply_blank_check.isChecked() else None
             date_labels = [d for d in crm_df['date']]
             logger.debug(f"CRM {crm_id}: {len(indices)} points, values range: {min(values, default=0):.2f} - {max(values, default=0):.2f}")
 
+            # Adjust x_range for single point
+            min_x = 0
+            max_x = max(indices, default=0)
+            if len(indices) == 1:
+                max_x = 1
+
+            x_range = [min_x, max_x]
+
             pen = mkPen(color=colors[idx % len(colors)], width=2)
-            plot_item = self.plot_widget.plot(indices, values, pen=pen, symbol='o', symbolSize=8, name=f"CRM {crm_id}")
+            plot_item = self.plot_widget.plot(indices, values, pen=pen, symbol='o', symbolSize=8, name=f"CRM {crm_id} (Corrected)" if self.apply_blank_check.isChecked() else f"CRM {crm_id}")
             self.plot_data_items.append((plot_item, crm_df, indices, date_labels))
+
+            if self.apply_blank_check.isChecked() and original_values is not None:
+                original_pen = mkPen(color=colors[(idx + 1) % len(colors)], width=1, style=Qt.DashLine)
+                original_plot_item = self.plot_widget.plot(indices, original_values, pen=original_pen, symbol='x', symbolSize=6, name=f"CRM {crm_id} (Original)")
+                self.plot_data_items.append((original_plot_item, original_df, indices, date_labels))
+
             logger.debug(f"Plotted {len(crm_df)} points for CRM ID {crm_id}")
             plotted_records += len(crm_df)
 
             if current_element != "All Elements" and self.crm_combo.currentText() != "All CRM IDs":
                 ver_value = self.get_verification_value(crm_id, current_element)
                 if ver_value is not None and not pd.isna(ver_value):
-                    x_range = [0, max(indices, default=0)]
                     delta = ver_value * (percentage / 100) / 3
                     self.plot_widget.plot(x_range, [ver_value * (1 - percentage / 100)] * 2, pen=mkPen('#FF6B6B', width=2, style=Qt.DotLine), name="LCL")
                     self.plot_widget.plot(x_range, [ver_value - 2 * delta] * 2, pen=mkPen('#4ECDC4', width=1, style=Qt.DotLine), name="-2LS")
@@ -1252,6 +1624,17 @@ class CRMDataVisualizer(QMainWindow):
             logger.info(f"Plotted {plotted_records} records")
         
         self.update_table(plot_df, pd.DataFrame())
+
+    def show_out_of_range_dialog(self):
+        all_df = pd.concat([self.crm_df, self.blank_df])
+        file_names = all_df['file_name'].unique()
+        if len(file_names) == 0:
+            QMessageBox.warning(self, "Warning", "No files available")
+            return
+        
+        percentage = float(self.percentage_edit.text()) if validate_percentage(self.percentage_edit.text()) else 10.0
+        dialog = OutOfRangeFilesDialog(self, file_names, self.crm_db_path, percentage, self.ver_db_path)
+        dialog.exec_()
 
     def edit_record(self):
         selected = self.table_widget.currentRow()
