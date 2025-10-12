@@ -175,33 +175,37 @@ def load_raw_file(file_path, db_path, selected_device=None):
                             blank_match = blank_pattern.match(current_sample)
                             crm_match = crm_pattern.match(current_sample)
                             if blank_match:
-                                type_value = "BLANK"
+                                crm_id_value = "BLANK"  # برای BLANK، crm_id هم BLANK است
                                 norm_crm_id = None
                             elif crm_match:
-                                type_value = current_sample
-                                norm_crm_id = normalize_crm_id(type_value)
+                                # استخراج فقط عدد از current_sample
+                                crm_id_value = normalize_crm_id(current_sample)
+                                norm_crm_id = crm_id_value
                                 if norm_crm_id not in allowed_crms:
                                     logger.debug(f"Skipping row {idx} in {file_path.name}: Invalid CRM ID {norm_crm_id}")
                                     continue
                             else:
                                 logger.debug(f"Skipping row {idx} in {file_path.name}: Invalid type {current_sample}")
                                 continue
+                            
+                            # current_sample به عنوان solution_label (کل عبارت) و crm_id_value به عنوان crm_id (فقط عدد)
                             data_rows.append({
-                                "crm_id": type_value,
-                                "solution_label": current_sample,
+                                "crm_id": crm_id_value,  # فقط عدد یا BLANK
+                                "solution_label": current_sample,  # کل عبارت اصلی
                                 "element": element,
                                 "value": concentration,
                                 "file_name": file_path.name,
                                 "folder_name": selected_device or str(file_path.parent.name),
                                 "date": file_date
                             })
-                            logger.debug(f"Added row {idx} in {file_path.name}: type={type_value}, norm_crm_id={norm_crm_id}")
+                            logger.debug(f"Added row {idx} in {file_path.name}: crm_id={crm_id_value}, solution_label={current_sample}, norm_crm_id={norm_crm_id}")
                         else:
                             logger.warning(f"Skipping row {idx} in {file_path.name}: Non-numeric concentration")
                     except Exception as e:
                         logger.error(f"Error processing row {idx} in {file_path.name}: {str(e)}")
                         continue
         else:
+            # Old format
             temp_df = pd.read_csv(file_path, header=None, nrows=1, encoding='utf-8', low_memory=False)
             logger.debug(f"CSV header preview for {file_path.name}: {temp_df.to_string()}")
             if temp_df.iloc[0].notna().sum() == 1:
@@ -223,17 +227,35 @@ def load_raw_file(file_path, db_path, selected_device=None):
                 raise ValueError(f"Required columns missing: {', '.join(missing_cols)}")
             
             df['Element'] = df['Element'].apply(split_element_name)
-            df['crm_id'] = df['Solution Label'].apply(lambda x: "BLANK" if blank_pattern.match(str(x).strip()) else x)
-            df['norm_crm_id'] = df['crm_id'].apply(normalize_crm_id)
-            df = df[(df['crm_id'] == "BLANK") | (df['norm_crm_id'].isin(allowed_crms))]
+            
+            # اصلاح بخش مهم: استخراج crm_id درست
+            df['norm_crm_id'] = df['Solution Label'].apply(normalize_crm_id)
+            df['is_blank'] = df['Solution Label'].apply(lambda x: bool(blank_pattern.match(str(x).strip())))
+            
+            # برای BLANK ها، crm_id = "BLANK"
+            # برای CRM ها، crm_id = norm_crm_id (فقط عدد)
+            # solution_label = Solution Label اصلی (کل عبارت)
+            df['crm_id'] = df.apply(
+                lambda row: "BLANK" if row['is_blank'] else (row['norm_crm_id'] if pd.notna(row['norm_crm_id']) else None),
+                axis=1
+            )
+            
+            # فیلتر کردن رکوردها
+            df = df[(df['is_blank']) | (df['norm_crm_id'].isin(allowed_crms))]
+            
             df['value'] = pd.to_numeric(df['Corr Con'], errors='coerce')
             df = df.dropna(subset=['value'])
             df['file_name'] = file_path.name
             df['folder_name'] = selected_device or str(file_path.parent.name)
             df['date'] = file_date
+            
+            # انتخاب ستون‌های نهایی
             data_rows = df[['crm_id', 'Solution Label', 'Element', 'value', 'file_name', 'folder_name', 'date']].rename(
                 columns={'Solution Label': 'solution_label', 'Element': 'element'}
             ).to_dict('records')
+            
+            logger.debug(f"Old format processing - Unique crm_id: {set(row['crm_id'] for row in data_rows if row['crm_id'])}")
+            logger.debug(f"Old format processing - Sample data_rows: {data_rows[:2]}")
         
         if not data_rows:
             logger.error(f"No valid data found in {file_path.name}")
