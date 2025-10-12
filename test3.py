@@ -589,7 +589,7 @@ class CRMDataVisualizer(QMainWindow):
         self.updating_filters = False
         self.verification_cache = {}
         self.plot_data_items = []
-        self.logo_path = Path("logo.png")
+        self.logo_path = Path("logo.jpg")
 
         self.main_widget = QWidget()
         self.setCentralWidget(self.main_widget)
@@ -730,7 +730,7 @@ class CRMDataVisualizer(QMainWindow):
         self.logo_layout = QVBoxLayout()
         self.logo_layout.setContentsMargins(10, 10, 10, 10)
         self.logo_label = QLabel()
-        self.logo_label.setFixedSize(100, 50)
+        self.logo_label.setFixedSize(140, 150)
         self.logo_layout.addWidget(self.logo_label)
         self.logo_card.setLayout(self.logo_layout)
         self.logo_card.setFixedWidth(120)
@@ -804,7 +804,7 @@ class CRMDataVisualizer(QMainWindow):
     def load_default_logo(self):
         if self.logo_path.exists():
             pixmap = QPixmap(str(self.logo_path))
-            self.logo_label.setPixmap(pixmap.scaled(100, 50, Qt.KeepAspectRatio))
+            self.logo_label.setPixmap(pixmap.scaled(100, 120))
             logger.info(f"Default logo loaded: {self.logo_path}")
         else:
             logger.warning(f"Default logo not found at: {self.logo_path}")
