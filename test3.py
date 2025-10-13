@@ -1194,8 +1194,8 @@ class CRMDataVisualizer(QMainWindow):
 
         self.crm_df = pd.DataFrame()
         self.blank_df = pd.DataFrame()
-        self.crm_db_path = self.get_db_path("crm_blank.db")
-        self.ver_db_path = self.get_db_path("crm_data.db")
+        self.crm_db_path = "crm_blank.db"
+        self.ver_db_path = "crm_data.db"
         self.filtered_crm_df_cache = None
         self.filtered_blank_df_cache = None
         self.plot_df_cache = None
@@ -1210,7 +1210,6 @@ class CRMDataVisualizer(QMainWindow):
         self.main_layout.setSpacing(16)
         self.main_layout.setContentsMargins(20, 20, 20, 20)
 
-        # Button Card
         self.button_card = CardWidget()
         self.button_card.setStyleSheet("""
             CardWidget {
@@ -1240,7 +1239,6 @@ class CRMDataVisualizer(QMainWindow):
         self.button_card.setLayout(self.button_layout)
         self.main_layout.addWidget(self.button_card)
 
-        # Filter and Logo Layout
         self.filter_logo_layout = QHBoxLayout()
         self.filter_logo_layout.setSpacing(16)
 
@@ -1267,7 +1265,6 @@ class CRMDataVisualizer(QMainWindow):
         """)
         self.filter_layout.addWidget(self.filter_title)
 
-        # Controls Layout
         self.controls_layout = QHBoxLayout()
         self.controls_layout.setSpacing(12)
         self.device_label = QLabel("Device:")
@@ -1289,7 +1286,7 @@ class CRMDataVisualizer(QMainWindow):
         self.percentage_edit.setPlaceholderText("%")
         self.percentage_edit.setFixedWidth(80)
         self.percentage_edit.setText("10")
-        self.plot_button = PrimaryPushButton("Plot Data")  # دکمه Plot به کنترل‌ها اضافه شد
+        self.plot_button = PrimaryPushButton("Plot Data")
         self.controls_layout.addWidget(self.device_label)
         self.controls_layout.addWidget(self.device_combo)
         self.controls_layout.addWidget(self.element_label)
@@ -1306,7 +1303,6 @@ class CRMDataVisualizer(QMainWindow):
         self.controls_layout.addStretch()
         self.filter_layout.addLayout(self.controls_layout)
 
-        # Checkbox Layout
         self.checkbox_layout = QVBoxLayout()
         self.checkbox_layout.setSpacing(8)
         self.best_wl_check = CheckBox("Select Best Wavelength")
@@ -1405,7 +1401,7 @@ class CRMDataVisualizer(QMainWindow):
         self.plot_button.clicked.connect(self.plot_data)
         self.save_button.clicked.connect(self.save_plot)
         self.reset_button.clicked.connect(self.reset_filters)
-        self.plot_widget.scene().sigMouseClicked.connect(self.on_mouse_clicked)
+        # self.plot_widget.scene().sigMouseClicked.connect(self.on_mouse_clicked)  # Removed
         self.plot_widget.scene().sigMouseMoved.connect(self.on_mouse_moved)
 
         self.apply_styles()
@@ -2001,75 +1997,82 @@ class CRMDataVisualizer(QMainWindow):
                 logger.debug("No point found near click position")
 
     def on_mouse_moved(self, pos):
-        try:
-            pos = self.plot_widget.getViewBox().mapSceneToView(pos)
-            x, y = pos.x(), pos.y()
-            closest_dist = float('inf')
-            closest_info = None
-            closest_point = None
+            try:
+                pos = self.plot_widget.getViewBox().mapSceneToView(pos)
+                x, y = pos.x(), pos.y()
+                closest_dist = float('inf')
+                closest_info = None
+                closest_point = None
 
-            for plot_item, crm_df, indices, date_labels in self.plot_data_items:
-                # Get the data from the plot item
-                plot_data = plot_item.getData()
-                if plot_data is None:
-                    continue
-                plot_x, plot_y = plot_data
+                # Get current view range for normalization
+                view_box = self.plot_widget.getViewBox()
+                x_min, x_max = view_box.viewRange()[0]
+                y_min, y_max = view_box.viewRange()[1]
+                x_range = x_max - x_min if x_max != x_min else 1
+                y_range = y_max - y_min if y_max != y_min else 1
 
-                # Calculate distances
-                distances = np.sqrt((plot_x - x)**2 + (plot_y - y)**2)
-                min_dist_idx = np.argmin(distances)
-                min_dist = distances[min_dist_idx]
+                for plot_item, crm_df, indices, date_labels in self.plot_data_items:
+                    plot_data = plot_item.getData()
+                    if plot_data is None:
+                        continue
+                    plot_x, plot_y = plot_data
 
-                if min_dist < closest_dist:
-                    closest_dist = min_dist
-                    i = min_dist_idx
-                    value = crm_df.iloc[i]['value']
-                    date = date_labels[i]
-                    file_name = crm_df.iloc[i]['file_name']
-                    folder_name = crm_df.iloc[i]['folder_name']
-                    crm_id = crm_df.iloc[i]['norm_crm_id']
-                    element = crm_df.iloc[i]['element']
-                    solution_label = crm_df.iloc[i]['solution_label']
-                    blank_value = crm_df.iloc[i].get('blank_value')
-                    original_value = crm_df.iloc[i].get('original_value', value)
+                    # Normalized dist
+                    dx = (plot_x - x) / x_range
+                    dy = (plot_y - y) / y_range
+                    distances = np.sqrt(dx**2 + dy**2)
+                    min_dist_idx = np.argmin(distances)
+                    min_dist = distances[min_dist_idx]
 
-                    blank_info = ""
-                    if not self.filtered_blank_df_cache.empty:
-                        relevant_blanks = self.filtered_blank_df_cache[
-                            (self.filtered_blank_df_cache['file_name'] == file_name) &
-                            (self.filtered_blank_df_cache['folder_name'] == folder_name) &
-                            (self.filtered_blank_df_cache['element'] == element)
-                        ]
-                        if not relevant_blanks.empty:
-                            blank_info = "\nBLANK Data:\n"
-                            for _, blank_row in relevant_blanks.iterrows():
-                                blank_info += f"  - {blank_row['solution_label']}: {blank_row['value']:.2f}\n"
+                    if min_dist < closest_dist:
+                        closest_dist = min_dist
+                        i = min_dist_idx
+                        value = crm_df.iloc[i]['value']
+                        date = date_labels[i]
+                        file_name = crm_df.iloc[i]['file_name']
+                        folder_name = crm_df.iloc[i]['folder_name']
+                        crm_id = crm_df.iloc[i]['norm_crm_id']
+                        element = crm_df.iloc[i]['element']
+                        solution_label = crm_df.iloc[i]['solution_label']
+                        blank_value = crm_df.iloc[i].get('blank_value')
+                        original_value = crm_df.iloc[i].get('original_value', value)
 
-                    closest_info = (
-                        f"CRM ID: {crm_id}\n"
-                        f"Element: {element}\n"
-                        f"Date: {date}\n"
-                        f"Value: {value:.2f}\n"
-                        f"Original Value: {original_value:.2f}\n" if blank_value is not None else f"Value: {value:.2f}\n"
-                        f"Blank Value Applied: {blank_value:.2f}\n" if blank_value is not None else ""
-                        f"Solution Label: {solution_label}\n"
-                        f"File: {file_name}\n"
-                        f"{blank_info}"
-                    )
-                    closest_point = (plot_x[min_dist_idx], plot_y[min_dist_idx])
+                        blank_info = ""
+                        if not self.filtered_blank_df_cache.empty:
+                            relevant_blanks = self.filtered_blank_df_cache[
+                                (self.filtered_blank_df_cache['file_name'] == file_name) &
+                                (self.filtered_blank_df_cache['folder_name'] == folder_name) &
+                                (self.filtered_blank_df_cache['element'] == element)
+                            ]
+                            if not relevant_blanks.empty:
+                                blank_info = "\nBLANK Data:\n"
+                                for _, blank_row in relevant_blanks.iterrows():
+                                    blank_info += f"  - {blank_row['solution_label']}: {blank_row['value']:.6f}\n"
 
-            if closest_info and closest_dist < 0.5:  # Adjusted threshold for better detection
-                self.tooltip_label.setText(closest_info)
-                self.tooltip_label.adjustSize()
-                # Position tooltip near the point
-                tooltip_pos = self.plot_widget.getViewBox().mapFromView(pos)
-                self.tooltip_label.move(int(tooltip_pos.x() + 15), int(tooltip_pos.y() - self.tooltip_label.height() / 2))
-                self.tooltip_label.setVisible(True)
-            else:
+                        closest_info = (
+                            f"CRM ID: {crm_id}\n"
+                            f"Element: {element}\n"
+                            f"Date: {date}\n"
+                            f"Value: {value:.6f}\n"
+                            f"Original Value: {original_value:.6f}\n" if blank_value is not None else f"Value: {value:.6f}\n"
+                            f"Blank Value Applied: {blank_value:.6f}\n" if blank_value is not None else ""
+                            f"Solution Label: {solution_label}\n"
+                            f"File: {file_name}\n"
+                            f"{blank_info}"
+                        )
+                        closest_point = (plot_x[min_dist_idx], plot_y[min_dist_idx])
+
+                if closest_info and closest_dist < 0.05:  # Adjusted normalized threshold
+                    self.tooltip_label.setText(closest_info)
+                    self.tooltip_label.adjustSize()
+                    tooltip_pos = self.plot_widget.getViewBox().mapFromView(pos)
+                    self.tooltip_label.move(int(tooltip_pos.x() + 15), int(tooltip_pos.y() - self.tooltip_label.height() / 2))
+                    self.tooltip_label.setVisible(True)
+                else:
+                    self.tooltip_label.setVisible(False)
+            except Exception as e:
+                logger.error(f"Error in on_mouse_moved: {str(e)}")
                 self.tooltip_label.setVisible(False)
-        except Exception as e:
-            logger.error(f"Error in on_mouse_moved: {str(e)}")
-            self.tooltip_label.setVisible(False)
 
     def save_plot(self):
         try:
