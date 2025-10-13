@@ -20,7 +20,7 @@ from PyQt5.QtGui import QFont, QColor
 from PyQt5.QtCore import Qt
 import pandas as pd
 import openpyxl
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 import numpy as np
 from pathlib import Path
 from PIL import Image
@@ -805,9 +805,9 @@ class OutOfRangeTableDialog(QDialog):
         self.out_df = out_df
         self.layout = QVBoxLayout()
         self.table_widget = QTableWidget()
-        self.table_widget.setColumnCount(5)  # Removed Value Status column
+        self.table_widget.setColumnCount(6)  # Added column for Percentage Difference
         self.table_widget.setHorizontalHeaderLabels([
-            "CRM ID", "Element", "Value", "Corrected Value", "Ref Value"
+            "CRM ID", "Element", "Value", "Corrected Value", "Ref Value", "Diff %"
         ])
 
         header = self.table_widget.horizontalHeader()
@@ -827,20 +827,28 @@ class OutOfRangeTableDialog(QDialog):
             for i, row in out_df.iterrows():
                 crm_id_item = QTableWidgetItem(str(row['crm_id']) if pd.notna(row['crm_id']) else "")
                 element_item = QTableWidgetItem(str(row['element']) if pd.notna(row['element']) else "")
-                value_item = QTableWidgetItem(f"{row['value']:.2f}" if pd.notna(row['value']) else "")
-                corrected_item = QTableWidgetItem(f"{row['corrected_value']:.2f}" if pd.notna(row['corrected_value']) else "")
-                ref_item = QTableWidgetItem(f"{row['ref_value']:.3f}" if pd.notna(row['ref_value']) else "")
+                value_item = QTableWidgetItem(f"{row['value']:.6f}" if pd.notna(row['value']) else "")
+                corrected_item = QTableWidgetItem(f"{row['corrected_value']:.6f}" if pd.notna(row['corrected_value']) else "")
+                ref_item = QTableWidgetItem(f"{row['ref_value']:.6f}" if pd.notna(row['ref_value']) else "")
+                
+                # Calculate percentage difference
+                percentage_diff = (abs(row['corrected_value'] - row['ref_value']) / row['ref_value'] * 100 
+                                 if pd.notna(row['corrected_value']) and pd.notna(row['ref_value']) and row['ref_value'] != 0 
+                                 else 0)
+                diff_item = QTableWidgetItem(f"{percentage_diff:.2f}%")
 
                 value_color = QColor('red') if row['out_no_blank'] else QColor('green')
                 corrected_color = QColor('red') if row['out_with_blank'] else QColor('green')
                 value_item.setForeground(value_color)
                 corrected_item.setForeground(corrected_color)
+                diff_item.setForeground(QColor('black'))
 
                 self.table_widget.setItem(i, 0, crm_id_item)
                 self.table_widget.setItem(i, 1, element_item)
                 self.table_widget.setItem(i, 2, value_item)
                 self.table_widget.setItem(i, 3, corrected_item)
                 self.table_widget.setItem(i, 4, ref_item)
+                self.table_widget.setItem(i, 5, diff_item)
         else:
             self.table_widget.setRowCount(0)
 
@@ -863,8 +871,15 @@ class OutOfRangeTableDialog(QDialog):
         fname, _ = QFileDialog.getSaveFileName(self, "Save Excel File", "", "Excel Files (*.xlsx)")
         if fname:
             try:
-                # Prepare DataFrame for export, excluding out_no_blank and out_with_blank
+                # Prepare DataFrame for export
                 export_df = self.out_df[['crm_id', 'element', 'value', 'corrected_value', 'ref_value']].copy()
+                # Add percentage difference column (store as decimal, e.g., 0.5530 for 55.30%)
+                export_df['Diff %'] = export_df.apply(
+                    lambda row: (abs(row['corrected_value'] - row['ref_value']) / row['ref_value'] 
+                                 if pd.notna(row['corrected_value']) and pd.notna(row['ref_value']) and row['ref_value'] != 0 
+                                 else 0), 
+                    axis=1
+                )
 
                 # Save to Excel with openpyxl
                 with pd.ExcelWriter(fname, engine='openpyxl') as writer:
@@ -872,25 +887,57 @@ class OutOfRangeTableDialog(QDialog):
                     workbook = writer.book
                     worksheet = writer.sheets['OutOfRange']
 
-                    # Define fonts and fill
-                    red_font = Font(color='FF0000')
-                    green_font = Font(color='008000')
+                    # Define styles
+                    red_font = Font(color='FF0000', bold=True)
+                    green_font = Font(color='008000', bold=True)
+                    black_font = Font(color='000000')
+                    header_font = Font(bold=True, color='FFFFFF')
+                    header_fill = PatternFill(start_color='0078D4', end_color='0078D4', fill_type='solid')
                     out_of_range_fill = PatternFill(start_color='F0F0F0', end_color='F0F0F0', fill_type='solid')
+                    thin_border = Border(
+                        left=Side(style='thin'), 
+                        right=Side(style='thin'), 
+                        top=Side(style='thin'), 
+                        bottom=Side(style='thin')
+                    )
+                    center_align = Alignment(horizontal='center', vertical='center')
 
-                    # Apply formatting
-                    for row_idx, row in enumerate(self.out_df.itertuples(), start=2):  # Start from 2 to skip header
+                    # Apply header styles
+                    for cell in worksheet[1]:
+                        cell.font = header_font
+                        cell.fill = header_fill
+                        cell.alignment = center_align
+                        cell.border = thin_border
+
+                    # Apply formatting to data rows
+                    for row_idx, row in enumerate(self.out_df.itertuples(), start=2):
                         value_out = row.out_no_blank
                         corrected_out = row.out_with_blank
-                        # Apply font color to Value and Corrected Value columns
-                        value_cell = worksheet.cell(row=row_idx, column=3)  # Value column (index 3)
-                        corrected_cell = worksheet.cell(row=row_idx, column=4)  # Corrected Value column (index 4)
-                        value_cell.font = red_font if value_out else green_font
-                        corrected_cell.font = red_font if corrected_out else green_font
 
-                        # Apply row background color if out of range
-                        if value_out or corrected_out:
-                            for col_idx in range(1, 6):  # Columns A to E
-                                worksheet.cell(row=row_idx, column=col_idx).fill = out_of_range_fill
+                        # Apply styles to cells
+                        for col_idx, col_name in enumerate(['crm_id', 'element', 'value', 'corrected_value', 'ref_value', 'Diff %'], 1):
+                            cell = worksheet.cell(row=row_idx, column=col_idx)
+                            cell.border = thin_border
+                            cell.alignment = center_align
+                            
+                            if col_name == 'value':
+                                cell.font = red_font if value_out else green_font
+                                cell.number_format = '0.000000'
+                            elif col_name == 'corrected_value':
+                                cell.font = red_font if corrected_out else green_font
+                                cell.number_format = '0.000000'
+                            elif col_name == 'ref_value':
+                                cell.font = black_font
+                                cell.number_format = '0.000000'
+                            elif col_name == 'Diff %':
+                                cell.font = black_font
+                                cell.number_format = '0.00%'  # Format as percentage (0.5530 → 55.30%)
+                            else:
+                                cell.font = black_font
+
+                            # Apply row background if out of range
+                            if value_out or corrected_out:
+                                cell.fill = out_of_range_fill
 
                     # Adjust column widths
                     for col in worksheet.columns:
@@ -901,15 +948,17 @@ class OutOfRangeTableDialog(QDialog):
                                 max_length = max(max_length, len(str(cell.value)))
                             except:
                                 pass
-                        adjusted_width = max_length + 2
+                        adjusted_width = min(max_length + 2, 30)  # Cap width at 30 for aesthetics
                         worksheet.column_dimensions[column].width = adjusted_width
+
+                    # Add filters to the table
+                    worksheet.auto_filter.ref = worksheet.dimensions
 
                 QMessageBox.information(self, "Success", f"Data exported to {fname}")
                 logger.info(f"Exported out-of-range data to {fname}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to export: {str(e)}")
                 logger.error(f"Error exporting Excel: {str(e)}")
-
 
 class OutOfRangeThread(QThread):
     out_of_range_data = pyqtSignal(pd.DataFrame)
@@ -1952,16 +2001,30 @@ class CRMDataVisualizer(QMainWindow):
                 logger.debug("No point found near click position")
 
     def on_mouse_moved(self, pos):
-        pos = self.plot_widget.getViewBox().mapSceneToView(pos)
-        x, y = pos.x(), pos.y()
-        closest_dist = float('inf')
-        closest_info = None
+        try:
+            pos = self.plot_widget.getViewBox().mapSceneToView(pos)
+            x, y = pos.x(), pos.y()
+            closest_dist = float('inf')
+            closest_info = None
+            closest_point = None
 
-        for plot_item, crm_df, indices, date_labels in self.plot_data_items:
-            for i, (idx, value, date) in enumerate(zip(indices, crm_df['value'], date_labels)):
-                dist = ((idx - x) ** 2 + (value - y) ** 2) ** 0.5
-                if dist < 1:
-                    closest_dist = dist
+            for plot_item, crm_df, indices, date_labels in self.plot_data_items:
+                # Get the data from the plot item
+                plot_data = plot_item.getData()
+                if plot_data is None:
+                    continue
+                plot_x, plot_y = plot_data
+
+                # Calculate distances
+                distances = np.sqrt((plot_x - x)**2 + (plot_y - y)**2)
+                min_dist_idx = np.argmin(distances)
+                min_dist = distances[min_dist_idx]
+
+                if min_dist < closest_dist:
+                    closest_dist = min_dist
+                    i = min_dist_idx
+                    value = crm_df.iloc[i]['value']
+                    date = date_labels[i]
                     file_name = crm_df.iloc[i]['file_name']
                     folder_name = crm_df.iloc[i]['folder_name']
                     crm_id = crm_df.iloc[i]['norm_crm_id']
@@ -1993,13 +2056,19 @@ class CRMDataVisualizer(QMainWindow):
                         f"File: {file_name}\n"
                         f"{blank_info}"
                     )
+                    closest_point = (plot_x[min_dist_idx], plot_y[min_dist_idx])
 
-        if closest_info:
-            self.tooltip_label.setText(closest_info)
-            self.tooltip_label.adjustSize()
-            self.tooltip_label.move(int(pos.x() * 10 + 10), int(pos.y() * 10 + 10))
-            self.tooltip_label.setVisible(True)
-        else:
+            if closest_info and closest_dist < 0.5:  # Adjusted threshold for better detection
+                self.tooltip_label.setText(closest_info)
+                self.tooltip_label.adjustSize()
+                # Position tooltip near the point
+                tooltip_pos = self.plot_widget.getViewBox().mapFromView(pos)
+                self.tooltip_label.move(int(tooltip_pos.x() + 15), int(tooltip_pos.y() - self.tooltip_label.height() / 2))
+                self.tooltip_label.setVisible(True)
+            else:
+                self.tooltip_label.setVisible(False)
+        except Exception as e:
+            logger.error(f"Error in on_mouse_moved: {str(e)}")
             self.tooltip_label.setVisible(False)
 
     def save_plot(self):
