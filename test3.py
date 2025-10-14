@@ -1100,8 +1100,24 @@ class OutOfRangeThread(QThread):
             target_element = element if element in cols else element_base
             m = re.search(r'(?i)(?:CRM|OREAS)?\s*(\w+)(?:\s*par)?', crm_id)
             crm_id_part = m.group(1) if m else crm_id
-            query = f"SELECT * FROM {table_name} WHERE [CRM ID] LIKE ?"
-            cursor.execute(query, (f"%{crm_id_part}%",))
+
+            # Load selected method from settings in crm_blank.db
+            selected_method = None
+            conn_settings = sqlite3.connect(self.db_path)  # crm_blank.db
+            cursor_settings = conn_settings.cursor()
+            cursor_settings.execute("SELECT selected_method FROM settings WHERE crm_id = ?", (crm_id_part,))
+            row = cursor_settings.fetchone()
+            if row:
+                selected_method = row[0]
+            conn_settings.close()
+
+            # Query with or without method filter
+            if selected_method:
+                query = f"SELECT * FROM {table_name} WHERE [CRM ID] LIKE ? AND [Analysis Method] = ?"
+                cursor.execute(query, (f"%{crm_id_part}%", selected_method))
+            else:
+                query = f"SELECT * FROM {table_name} WHERE [CRM ID] LIKE ?"
+                cursor.execute(query, (f"%{crm_id_part}%",))
             crm_data = cursor.fetchall()
 
             if not crm_data:
@@ -1185,6 +1201,106 @@ class OutOfRangeThread(QThread):
 
         return best_blank_value, corrected_value
     
+class SettingsDialog(QDialog):
+    def __init__(self, parent=None, crm_db_path=None, ver_db_path=None):
+        super().__init__(parent)
+        self.setWindowTitle("تنظیمات CRM")
+        self.setFixedSize(400, 500)
+        self.crm_db_path = crm_db_path
+        self.ver_db_path = ver_db_path
+        
+        self.layout = QVBoxLayout()
+        self.crm_ids = ['258', '252', '906', '506', '233', '255', '263', '260']
+        self.method_selections = {}
+        
+        self.load_settings()
+        
+        for crm_id in self.crm_ids:
+            label = QLabel(f"روش برای CRM {crm_id}:")
+            self.layout.addWidget(label)
+            
+            combo = ComboBox()
+            options = self.get_methods_for_crm(crm_id)
+            combo.addItems(options)
+            selected = self.method_selections.get(crm_id, options[0] if options else "")
+            combo.setCurrentText(selected)
+            self.method_selections[crm_id] = combo
+            self.layout.addWidget(combo)
+        
+        self.save_button = QPushButton("ذخیره")
+        self.save_button.clicked.connect(self.save_settings)
+        self.layout.addWidget(self.save_button)
+        
+        self.setLayout(self.layout)
+    
+    def get_methods_for_crm(self, crm_id):
+        """Extract full CRM labels (e.g., '252b 4acid', '252c Aqua') from verification database."""
+        try:
+            conn = sqlite3.connect(self.ver_db_path)
+            cursor = conn.cursor()
+            table_name = "oreas_hs j" if re.match(r'(?i)oreas', crm_id) else "pivot_crm"
+            cursor.execute(f"SELECT [CRM ID], [Analysis Method] FROM {table_name} WHERE [CRM ID] LIKE ?", (f"%{crm_id}%",))
+            rows = cursor.fetchall()
+            conn.close()
+            
+            # Create full labels combining CRM ID and Analysis Method
+            methods = []
+            for row in rows:
+                crm_label = str(row[0]).strip()
+                method = str(row[1]).strip() if row[1] else "Unknown Method"
+                # Simplify method name for display
+                method_display = method.replace(" Digestion", "").lower()
+                full_label = f"{crm_label} {method_display}"
+                methods.append(full_label)
+            
+            methods = sorted(set(methods))  # Remove duplicates and sort
+            logger.debug(f"Methods for CRM {crm_id}: {methods}")
+            return methods if methods else ['No Methods Available']
+        except Exception as e:
+            logger.error(f"Error getting methods for CRM {crm_id}: {str(e)}")
+            return ['No Methods Available']
+    
+    def load_settings(self):
+        """Load saved settings from crm_blank.db."""
+        try:
+            conn = sqlite3.connect(self.crm_db_path)
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE IF NOT EXISTS settings (crm_id TEXT PRIMARY KEY, selected_method TEXT)")
+            for crm_id in self.crm_ids:
+                cursor.execute("SELECT selected_method FROM settings WHERE crm_id = ?", (crm_id,))
+                row = cursor.fetchone()
+                if row and row[0]:
+                    # Find the corresponding full label
+                    options = self.get_methods_for_crm(crm_id)
+                    for option in options:
+                        if row[0].lower() in option.lower():
+                            self.method_selections[crm_id] = option
+                            break
+                    else:
+                        self.method_selections[crm_id] = options[0] if options else ""
+            conn.close()
+        except Exception as e:
+            logger.error(f"Error loading settings: {str(e)}")
+    
+    def save_settings(self):
+        """Save selected methods to crm_blank.db."""
+        try:
+            conn = sqlite3.connect(self.crm_db_path)
+            cursor = conn.cursor()
+            for crm_id, combo in self.method_selections.items():
+                selected_text = combo.currentText()
+                # Extract just the method part (e.g., '4acid' or 'Aqua') for storage
+                method = selected_text.split()[-1] if selected_text and selected_text != "No Methods Available" else ""
+                cursor.execute("INSERT OR REPLACE INTO settings (crm_id, selected_method) VALUES (?, ?)", (crm_id, method))
+            conn.commit()
+            conn.close()
+            QMessageBox.information(self, "Success", "تنظیمات ذخیره شد")
+            logger.info("Settings saved successfully")
+            self.accept()
+        except Exception as e:
+            logger.error(f"Error saving settings: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Failed to save settings: {str(e)}")
+
 class CRMDataVisualizer(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1203,6 +1319,13 @@ class CRMDataVisualizer(QMainWindow):
         self.verification_cache = {}
         self.plot_data_items = []
         self.logo_path = Path("logo.jpg")
+
+        # Initialize settings table if not exists
+        conn = sqlite3.connect(self.crm_db_path)
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE IF NOT EXISTS settings (crm_id TEXT PRIMARY KEY, selected_method TEXT)")
+        conn.commit()
+        conn.close()
 
         self.main_widget = QWidget()
         self.setCentralWidget(self.main_widget)
@@ -1226,6 +1349,7 @@ class CRMDataVisualizer(QMainWindow):
         self.delete_button = PrimaryPushButton("Delete Files", self, FluentIcon.DELETE)
         self.edit_button = PrimaryPushButton("Edit Record", self, FluentIcon.EDIT)
         self.out_of_range_button = PrimaryPushButton("Out of Range", self, FluentIcon.SEARCH)
+        self.settings_button = PrimaryPushButton("تنظیمات", self, FluentIcon.SETTING)
         self.save_button = PrimaryPushButton("Save Plot", self, FluentIcon.SAVE)
         self.reset_button = PrimaryPushButton("Reset Filters", self, FluentIcon.SYNC)
         self.button_layout.addWidget(self.import_button)
@@ -1233,6 +1357,7 @@ class CRMDataVisualizer(QMainWindow):
         self.button_layout.addWidget(self.delete_button)
         self.button_layout.addWidget(self.edit_button)
         self.button_layout.addWidget(self.out_of_range_button)
+        self.button_layout.addWidget(self.settings_button)
         self.button_layout.addWidget(self.save_button)
         self.button_layout.addWidget(self.reset_button)
         self.button_layout.addStretch()
@@ -1398,6 +1523,7 @@ class CRMDataVisualizer(QMainWindow):
         self.delete_button.clicked.connect(self.delete_files)
         self.edit_button.clicked.connect(self.edit_record)
         self.out_of_range_button.clicked.connect(self.show_out_of_range_dialog)
+        self.settings_button.clicked.connect(self.open_settings_dialog)
         self.plot_button.clicked.connect(self.plot_data)
         self.save_button.clicked.connect(self.save_plot)
         self.reset_button.clicked.connect(self.reset_filters)
@@ -1409,6 +1535,10 @@ class CRMDataVisualizer(QMainWindow):
 
         logger.debug("Initializing CRMDataVisualizer")
         self.load_data_thread()
+
+    def open_settings_dialog(self):
+        dialog = SettingsDialog(self, self.crm_db_path, self.ver_db_path)
+        dialog.exec_()
 
     def get_db_path(self, name):
         return name
@@ -1675,6 +1805,14 @@ class CRMDataVisualizer(QMainWindow):
             return None
 
         try:
+            # Load selected method from settings in crm_blank.db
+            conn_settings = sqlite3.connect(self.crm_db_path)
+            cursor_settings = conn_settings.cursor()
+            cursor_settings.execute("SELECT selected_method FROM settings WHERE crm_id = ?", (crm_id,))
+            row = cursor_settings.fetchone()
+            selected_method = row[0] if row else None
+            conn_settings.close()
+
             conn = sqlite3.connect(self.ver_db_path)
             cursor = conn.cursor()
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -1683,7 +1821,6 @@ class CRMDataVisualizer(QMainWindow):
             if table_name not in tables:
                 logger.error(f"Table {table_name} does not exist in database")
                 conn.close()
-                QMessageBox.critical(self, "Error", f"Table {table_name} does not exist")
                 self.verification_cache[cache_key] = None
                 return None
 
@@ -1692,51 +1829,64 @@ class CRMDataVisualizer(QMainWindow):
             if 'CRM ID' not in cols:
                 logger.error(f"Column 'CRM ID' not found in {table_name}")
                 conn.close()
-                QMessageBox.critical(self, "Error", f"Column 'CRM ID' not found")
                 self.verification_cache[cache_key] = None
                 return None
 
             element_base = element.split()[0] if ' ' in element else element
             target_element = element if element in cols else element_base
-            m = re.search(r'(?i)(?:CRM|OREAS)?\s*(\w+)(?:\s*par)?', crm_id)
-            crm_id_part = m.group(1) if m else crm_id
-            query = f"SELECT * FROM {table_name} WHERE [CRM ID] LIKE ?"
-            cursor.execute(query, (f"%{crm_id_part}%",))
-            crm_data = cursor.fetchall()
 
+            # Try exact match with selected method first
+            if selected_method:
+                query = f"SELECT * FROM {table_name} WHERE [CRM ID] = ? AND [Analysis Method] = ?"
+                cursor.execute(query, (crm_id, selected_method))
+                crm_data = cursor.fetchall()
+                if crm_data:
+                    for row in crm_data:
+                        row_dict = {cols[i]: row[i] for i in range(len(cols))}
+                        value = row_dict.get(target_element)
+                        if value is not None and not pd.isna(value):
+                            try:
+                                value = float(value)
+                                self.verification_cache[cache_key] = value
+                                logger.debug(f"Verification value for CRM {crm_id}, Element {element}, Method {selected_method}: {value}")
+                                return value
+                            except (ValueError, TypeError):
+                                logger.warning(f"Invalid value for {target_element}: {value}")
+                                continue
+
+            # Fallback: Try any record with CRM ID if no method match or no method selected
+            query = f"SELECT * FROM {table_name} WHERE [CRM ID] LIKE ?"
+            cursor.execute(query, (f"%{crm_id}%",))
+            crm_data = cursor.fetchall()
             if not crm_data:
-                logger.warning(f"No CRM data found for {crm_id}")
+                logger.warning(f"No CRM data found for CRM {crm_id} with method {selected_method or 'any'}")
                 conn.close()
                 self.verification_cache[cache_key] = None
                 return None
 
             for row in crm_data:
                 row_dict = {cols[i]: row[i] for i in range(len(cols))}
-                label = str(row_dict['CRM ID']).strip().upper()
-                if label.find(crm_id_part.upper()) != -1:
-                    value = row_dict.get(target_element)
-                    if value is not None and not pd.isna(value):
-                        try:
-                            value = float(value)
-                            self.verification_cache[cache_key] = value
-                            logger.debug(f"Verification value for CRM {crm_id}, Element {element}: {value}")
-                            return value
-                        except (ValueError, TypeError):
-                            logger.warning(f"Invalid value for {target_element}: {value}")
-                            continue
+                value = row_dict.get(target_element)
+                if value is not None and not pd.isna(value):
+                    try:
+                        value = float(value)
+                        self.verification_cache[cache_key] = value
+                        logger.debug(f"Fallback verification value for CRM {crm_id}, Element {element}: {value}")
+                        return value
+                    except (ValueError, TypeError):
+                        logger.warning(f"Invalid value for {target_element}: {value}")
+                        continue
 
-            logger.warning(f"No valid value for {target_element} in {table_name}")
+            logger.warning(f"No valid value for {target_element} in {table_name} for CRM {crm_id}")
             self.verification_cache[cache_key] = None
             return None
         except Exception as e:
-            logger.error(f"Error querying database: {str(e)}")
-            QMessageBox.critical(self, "Error", f"Error querying database: {str(e)}")
+            logger.error(f"Error querying verification database: {str(e)}")
             self.verification_cache[cache_key] = None
             return None
         finally:
             if 'conn' in locals():
                 conn.close()
-
     def select_best_blank(self, crm_row, blank_df, ver_value):
         if blank_df.empty or ver_value is None:
             logger.debug(f"No blank correction applied: empty blank_df={blank_df.empty}, ver_value={ver_value}")
