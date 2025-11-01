@@ -1436,7 +1436,7 @@ class CRMDataVisualizer(QMainWindow):
         self.plot_widget.enableAutoRange()
         # یا می‌توانید فقط محورها را ریست کنید
         # self.plot_widget.getViewBox().autoRange()
-        
+
     def create_settings_table(self):
         """ایجاد جدول تنظیمات در دیتابیس اگر وجود نداشته باشد."""
         try:
@@ -1816,6 +1816,9 @@ class CRMDataVisualizer(QMainWindow):
         QApplication.processEvents()
         self.status_label.setText(f"Loaded {len(filtered_crm_df)} CRM records, {len(filtered_blank_df)} BLANK records")
         logger.info(f"Filtered {len(filtered_crm_df)} CRM records and {len(filtered_blank_df)} BLANK records")
+
+        # خودکار پلات کردن بعد از فیلتر
+        self.auto_plot()
 
     def update_table(self, crm_df, blank_df):
         self.table_widget.blockSignals(True)
