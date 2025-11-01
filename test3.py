@@ -1432,18 +1432,15 @@ class CRMDataVisualizer(QMainWindow):
         if self.updating_filters:
             return
         self.plot_data()
-        # خودکار تنظیم محورها (X و Y)
+        # فعال‌سازی Auto Range
         self.plot_widget.enableAutoRange()
-        # یا می‌توانید فقط محورها را ریست کنید
-        # self.plot_widget.getViewBox().autoRange()
 
     def on_device_or_crm_changed(self):
-        """وقتی Device یا CRM تغییر کرد، عناصر رو آپدیت کن"""
+        """وقتی Device یا CRM تغییر کرد، عناصر رو آپدیت کن و تنظیمات ذخیره شوند"""
         if self.updating_filters:
             return
+        self.save_settings()  # ذخیره فوری
         self.update_element_combo()
-        # فیلترها هم باید آپدیت بشن (برای کش)
-        self.on_filter_changed()
 
     def create_settings_table(self):
         """ایجاد جدول تنظیمات در دیتابیس اگر وجود نداشته باشد."""
@@ -1691,18 +1688,14 @@ class CRMDataVisualizer(QMainWindow):
         self.populate_filters()
 
     def on_filter_changed(self):
-        """به‌روزرسانی کش فیلترها — بدون دست زدن به ComboBoxها"""
+        """فیلترها تغییر کردند → ذخیره فوری + آپدیت"""
         if self.updating_filters:
             return
 
         self.updating_filters = True
         try:
-            if self.crm_df.empty and self.blank_df.empty:
-                self.table_widget.setRowCount(0)
-                self.status_label.setText("No data available")
-                logger.warning("No data available for filtering")
-                self.updating_filters = False
-                return
+            # ذخیره فوری تنظیمات
+            self.save_settings()
 
             # --- استخراج فیلترها ---
             from_date = None
@@ -1723,36 +1716,6 @@ class CRMDataVisualizer(QMainWindow):
                 'to_date': to_date
             }
 
-            # --- ذخیره تنظیمات فقط در صورت تغییر ---
-            current_settings = {
-                'device': self.device_combo.currentText(),
-                'element': self.element_combo.currentText(),
-                'crm_id': self.crm_combo.currentText(),
-                'from_date': self.from_date_edit.text(),
-                'to_date': self.to_date_edit.text(),
-                'percentage': self.percentage_edit.text() if validate_percentage(self.percentage_edit.text()) else "10",
-                'best_wl_checked': 1 if self.best_wl_check.isChecked() else 0,
-                'apply_blank_checked': 1 if self.apply_blank_check.isChecked() else 0
-            }
-
-            try:
-                conn = sqlite3.connect(self.crm_db_path)
-                cursor = conn.cursor()
-                cursor.execute("SELECT * FROM settings WHERE id = 1")
-                saved = cursor.fetchone()
-                conn.close()
-
-                if saved:
-                    saved_dict = {
-                        'device': saved[1], 'element': saved[2], 'crm_id': saved[3],
-                        'from_date': saved[4], 'to_date': saved[5], 'percentage': saved[6],
-                        'best_wl_checked': saved[7], 'apply_blank_checked': saved[8]
-                    }
-                    if current_settings != saved_dict:
-                        self.save_settings()
-            except Exception as e:
-                logger.error(f"Error checking settings: {str(e)}")
-
             # --- اجرای فیلتر در ترد جدا ---
             self.progress_bar.setVisible(True)
             self.filter_thread = FilterThread(self.crm_df, self.blank_df, filters)
@@ -1763,7 +1726,6 @@ class CRMDataVisualizer(QMainWindow):
 
         except Exception as e:
             logger.error(f"Error in on_filter_changed: {str(e)}")
-            self.status_label.setText("Filter error")
         finally:
             self.updating_filters = False
 
@@ -1782,7 +1744,7 @@ class CRMDataVisualizer(QMainWindow):
         return None
 
     def populate_filters(self):
-        """پر کردن اولیه ComboBoxها — فقط Device و CRM ID"""
+        """پر کردن اولیه ComboBoxها — بدون گزینه‌های All"""
         if self.crm_df.empty and self.blank_df.empty:
             logger.warning("No data available to populate filters")
             return
@@ -1792,35 +1754,31 @@ class CRMDataVisualizer(QMainWindow):
             # --- Device Combo ---
             self.device_combo.blockSignals(True)
             self.device_combo.clear()
-            self.device_combo.addItem("All Devices")
-            self.device_combo.addItems(['mass', 'oes 4ac', 'oes fire'])
+            self.device_combo.addItems(['mass', 'oes 4ac', 'oes fire'])  # حذف "All Devices"
             self.device_combo.blockSignals(False)
 
             # --- CRM Combo ---
             self.crm_combo.blockSignals(True)
             self.crm_combo.clear()
-            self.crm_combo.addItem("All CRM IDs")
             crms = sorted(self.crm_df['norm_crm_id'].dropna().unique())
-            self.crm_combo.addItems(crms)
+            self.crm_combo.addItems(crms)  # حذف "All CRM IDs"
             self.crm_combo.blockSignals(False)
 
-            # --- Element Combo — فقط "All Elements" در ابتدا ---
+            # --- Element Combo — فقط عناصر موجود ---
             self.element_combo.blockSignals(True)
             self.element_combo.clear()
-            self.element_combo.addItem("All Elements")
             self.element_combo.blockSignals(False)
 
             # --- ذخیره مقدار قبلی برای بازیابی ---
-            self._prev_device = "All Devices"
-            self._prev_crm = "All CRM IDs"
-            self._prev_element = "All Elements"
+            self._prev_device = self.device_combo.currentText() if self.device_combo.count() > 0 else ""
+            self._prev_crm = self.crm_combo.currentText() if self.crm_combo.count() > 0 else ""
+            self._prev_element = ""
 
         except Exception as e:
             logger.error(f"Error in populate_filters: {str(e)}")
         finally:
             self.updating_filters = False
 
-        # بعد از پر شدن اولیه، عناصر رو آپدیت کن
         QTimer.singleShot(50, self.update_element_combo)
 
     def update_filters(self):
@@ -1908,7 +1866,7 @@ class CRMDataVisualizer(QMainWindow):
         self.auto_plot()
 
     def update_element_combo(self):
-        """آپدیت عناصر بر اساس Device و CRM ID انتخاب شده"""
+        """آپدیت عناصر بر اساس Device و CRM ID انتخاب شده — بدون All Elements"""
         if self.updating_filters:
             return
 
@@ -1919,18 +1877,17 @@ class CRMDataVisualizer(QMainWindow):
 
             self.element_combo.blockSignals(True)
             self.element_combo.clear()
-            self.element_combo.addItem("All Elements")
 
             # --- فیلتر داده ---
-            if current_device != "All Devices" and current_crm != "All CRM IDs":
+            if current_device and current_crm:
                 mask = (
                     (self.crm_df['folder_name'].str.contains(current_device, case=False, na=False)) &
                     (self.crm_df['norm_crm_id'] == current_crm)
                 )
                 filtered = self.crm_df[mask]
-            elif current_device != "All Devices":
+            elif current_device:
                 filtered = self.crm_df[self.crm_df['folder_name'].str.contains(current_device, case=False, na=False)]
-            elif current_crm != "All CRM IDs":
+            elif current_crm:
                 filtered = self.crm_df[self.crm_df['norm_crm_id'] == current_crm]
             else:
                 filtered = self.crm_df
@@ -1943,12 +1900,12 @@ class CRMDataVisualizer(QMainWindow):
                 self.element_combo.addItems(elements)
 
             # --- حفظ انتخاب قبلی اگر معتبر باشد ---
-            prev_element = getattr(self, '_prev_element', "All Elements")
+            prev_element = getattr(self, '_prev_element', "")
             valid_items = [self.element_combo.itemText(i) for i in range(self.element_combo.count())]
             if prev_element in valid_items:
                 self.element_combo.setCurrentText(prev_element)
-            else:
-                self.element_combo.setCurrentText("All Elements")
+            elif self.element_combo.count() > 0:
+                self.element_combo.setCurrentIndex(0)
 
             self._prev_element = self.element_combo.currentText()
 
@@ -1958,8 +1915,8 @@ class CRMDataVisualizer(QMainWindow):
             self.element_combo.blockSignals(False)
             self.updating_filters = False
 
-        # --- پلات خودکار بعد از تغییر عنصر ---
         self.auto_plot()
+
 
     def update_table(self, crm_df, blank_df):
         self.table_widget.blockSignals(True)
@@ -2246,7 +2203,7 @@ class CRMDataVisualizer(QMainWindow):
         else:
             self.status_label.setText(f"Plotted {plotted_records} records")
             logger.info(f"Plotted {plotted_records} records")
-        
+        self.plot_widget.enableAutoRange()  # فعال‌سازی Auto Range
         self.update_table(plot_df, pd.DataFrame())
 
     def show_out_of_range_dialog(self):
@@ -2458,14 +2415,19 @@ class CRMDataVisualizer(QMainWindow):
     def reset_filters(self):
         if self.updating_filters:
             return
-        self.device_combo.setCurrentText("All Devices")
-        self.element_combo.setCurrentText("All Elements")
-        self.crm_combo.setCurrentText("All CRM IDs")
+
+        # اولین مقدار معتبر را انتخاب کن
+        if self.device_combo.count() > 0:
+            self.device_combo.setCurrentIndex(0)
+        if self.crm_combo.count() > 0:
+            self.crm_combo.setCurrentIndex(0)
         self.from_date_edit.clear()
         self.to_date_edit.clear()
         self.percentage_edit.setText("10")
         self.best_wl_check.setChecked(True)
         self.apply_blank_check.setChecked(False)
+
+        self.save_settings()  # ذخیره بعد از ریست
         logger.debug("Filters reset")
         self.update_filters()
 
