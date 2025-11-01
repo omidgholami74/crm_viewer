@@ -711,32 +711,36 @@ class FilterThread(QThread):
     def run(self):
         filtered_crm_df = self.crm_df.copy()
         filtered_blank_df = self.blank_df.copy()
-        # logger.debug(f"Applying filters: {self.filters}")
-        self.progress_updated.emit(20)
-        
-        if self.filters['device'] != "All Devices":
+
+        # Device
+        if self.filters['device']:
             filtered_crm_df = filtered_crm_df[filtered_crm_df['folder_name'].str.contains(self.filters['device'], case=False, na=False)]
             filtered_blank_df = filtered_blank_df[filtered_blank_df['folder_name'].str.contains(self.filters['device'], case=False, na=False)]
-        self.progress_updated.emit(40)
-        
-        if self.filters['element'] != "All Elements":
-            base_element = self.filters['element']
-            filtered_crm_df = filtered_crm_df[filtered_crm_df['element'].str.startswith(base_element + ' ', na=False) | (filtered_crm_df['element'] == base_element)]
-            filtered_blank_df = filtered_blank_df[filtered_blank_df['element'].str.startswith(base_element + ' ', na=False) | (filtered_blank_df['element'] == base_element)]
-        self.progress_updated.emit(60)
-        
-        if self.filters['crm'] != "All CRM IDs":
+
+        # CRM ID
+        if self.filters['crm']:
             filtered_crm_df = filtered_crm_df[filtered_crm_df['norm_crm_id'] == self.filters['crm']]
-        
+
+        # Element
+        if self.filters['element']:
+            base_element = self.filters['element']
+            filtered_crm_df = filtered_crm_df[
+                filtered_crm_df['element'].str.startswith(base_element + ' ', na=False) |
+                (filtered_crm_df['element'] == base_element)
+            ]
+            filtered_blank_df = filtered_blank_df[
+                filtered_blank_df['element'].str.startswith(base_element + ' ', na=False) |
+                (filtered_blank_df['element'] == base_element)
+            ]
+
+        # Date
         if self.filters['from_date']:
             filtered_crm_df = filtered_crm_df[filtered_crm_df['date'] >= self.filters['from_date'].strftime("%Y/%m/%d")]
             filtered_blank_df = filtered_blank_df[filtered_blank_df['date'] >= self.filters['from_date'].strftime("%Y/%m/%d")]
         if self.filters['to_date']:
             filtered_crm_df = filtered_crm_df[filtered_crm_df['date'] <= self.filters['to_date'].strftime("%Y/%m/%d")]
             filtered_blank_df = filtered_blank_df[filtered_blank_df['date'] <= self.filters['to_date'].strftime("%Y/%m/%d")]
-        
-        self.progress_updated.emit(100)
-        logger.debug(f"Filtered {len(filtered_crm_df)} CRM records and {len(filtered_blank_df)} BLANK records")
+
         self.filtered_data.emit(filtered_crm_df, filtered_blank_df)
 
 class OutOfRangeFilesDialog(QDialog):
@@ -1426,6 +1430,13 @@ class CRMDataVisualizer(QMainWindow):
 
         logger.debug("Initializing CRMDataVisualizer")
         self.load_data_thread()
+        
+        self.create_settings_table()
+        # بارگذاری تنظیمات ذخیره‌شده
+        self.load_settings()
+
+        # ذخیره خودکار هنگام بسته شدن
+        self.setAttribute(Qt.WA_DeleteOnClose, False)  # اطمینان از اجرای closeEven
 
     def auto_plot(self):
         """خودکار پلات کردن با تغییر element و تنظیم خودکار محورها"""
@@ -1436,11 +1447,11 @@ class CRMDataVisualizer(QMainWindow):
         self.plot_widget.enableAutoRange()
 
     def on_device_or_crm_changed(self):
-        """وقتی Device یا CRM تغییر کرد، عناصر رو آپدیت کن و تنظیمات ذخیره شوند"""
+        """وقتی Device یا CRM تغییر کرد، عناصر رو آپدیت کن"""
         if self.updating_filters:
             return
         self.save_settings()  # ذخیره فوری
-        self.update_element_combo()
+        self.update_element_combo()  # بدون پارامتر
 
     def create_settings_table(self):
         """ایجاد جدول تنظیمات در دیتابیس اگر وجود نداشته باشد."""
@@ -1485,112 +1496,115 @@ class CRMDataVisualizer(QMainWindow):
         finally:
             conn.close()
 
-    def save_settings(self):
-        """ذخیره تنظیمات کنونی فیلترها در دیتابیس."""
+    def create_settings_table(self):
+        """ایجاد جدول تنظیمات در دیتابیس اگر وجود نداشته باشد."""
         try:
             conn = sqlite3.connect(self.crm_db_path)
             cursor = conn.cursor()
 
-            # بررسی وجود جدول settings
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='settings'")
-            if not cursor.fetchone():
-                logger.warning("Settings table does not exist, creating it")
-                self.create_settings_table()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS settings (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    device TEXT,
+                    element TEXT,
+                    crm_id TEXT,
+                    from_date TEXT,
+                    to_date TEXT,
+                    percentage TEXT,
+                    best_wl_checked INTEGER,
+                    apply_blank_checked INTEGER
+                )
+            """)
 
-            # اصلاح قالب تاریخ‌ها
-            from_date = self.from_date_edit.text()
-            if from_date and validate_jalali_date(from_date):
-                y, m, d = map(int, from_date.split('/'))
-                from_date = f"{y:04d}/{m:02d}/{d:02d}"
-            else:
+            # بررسی وجود ردیف
+            cursor.execute("SELECT COUNT(*) FROM settings WHERE id = 1")
+            if cursor.fetchone()[0] == 0:
+                cursor.execute("""
+                    INSERT INTO settings (
+                        id, device, element, crm_id, from_date, to_date, 
+                        percentage, best_wl_checked, apply_blank_checked
+                    ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, ("mass", "", "", "", "", "10", 1, 0))
+
+            conn.commit()
+            logger.info("Settings table initialized")
+        except Exception as e:
+            logger.error(f"Error creating settings table: {str(e)}")
+        finally:
+            conn.close()
+
+
+    def save_settings(self):
+        """ذخیره تنظیمات فعلی در دیتابیس."""
+        try:
+            conn = sqlite3.connect(self.crm_db_path)
+            cursor = conn.cursor()
+
+            # اعتبارسنجی تاریخ
+            from_date = self.from_date_edit.text().strip()
+            if from_date and not validate_jalali_date(from_date):
                 from_date = ""
 
-            to_date = self.to_date_edit.text()
-            if to_date and validate_jalali_date(to_date):
-                y, m, d = map(int, to_date.split('/'))
-                to_date = f"{y:04d}/{m:02d}/{d:02d}"
-            else:
+            to_date = self.to_date_edit.text().strip()
+            if to_date and not validate_jalali_date(to_date):
                 to_date = ""
 
-            settings = {
-                'device': self.device_combo.currentText(),
-                'element': self.element_combo.currentText(),
-                'crm_id': self.crm_combo.currentText(),
-                'from_date': from_date,
-                'to_date': to_date,
-                'percentage': self.percentage_edit.text() if validate_percentage(self.percentage_edit.text()) else "10",
-                'best_wl_checked': 1 if self.best_wl_check.isChecked() else 0,
-                'apply_blank_checked': 1 if self.apply_blank_check.isChecked() else 0
-            }
+            # اعتبارسنجی درصد
+            percentage = self.percentage_edit.text().strip()
+            if not validate_percentage(percentage):
+                percentage = "10"
 
             cursor.execute("""
-                UPDATE settings
-                SET device = ?, element = ?, crm_id = ?, from_date = ?, to_date = ?,
+                UPDATE settings SET
+                    device = ?, element = ?, crm_id = ?, from_date = ?, to_date = ?,
                     percentage = ?, best_wl_checked = ?, apply_blank_checked = ?
                 WHERE id = 1
             """, (
-                settings['device'], settings['element'], settings['crm_id'],
-                settings['from_date'], settings['to_date'], settings['percentage'],
-                settings['best_wl_checked'], settings['apply_blank_checked']
+                self.device_combo.currentText(),
+                self.element_combo.currentText(),
+                self.crm_combo.currentText(),
+                from_date,
+                to_date,
+                percentage,
+                1 if self.best_wl_check.isChecked() else 0,
+                1 if self.apply_blank_check.isChecked() else 0
             ))
             conn.commit()
-            logger.debug(f"Settings saved: {settings}")
+            logger.debug("Settings saved to database")
         except Exception as e:
             logger.error(f"Error saving settings: {str(e)}")
         finally:
             conn.close()
 
+
     def load_settings(self):
-        """لود تنظیمات از دیتابیس و اعمال آن‌ها به فیلترها."""
         try:
             conn = sqlite3.connect(self.crm_db_path)
             cursor = conn.cursor()
-
-            # بررسی وجود جدول settings
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='settings'")
-            if not cursor.fetchone():
-                logger.warning("Settings table does not exist")
-                return
-
-            # بررسی ستون‌های جدول
-            cursor.execute("PRAGMA table_info(settings)")
-            columns = [col[1] for col in cursor.fetchall()]
-            required_columns = ['id', 'device', 'element', 'crm_id', 'from_date', 'to_date', 'percentage', 'best_wl_checked', 'apply_blank_checked']
-            if not all(col in columns for col in required_columns):
-                logger.error(f"Settings table missing required columns: {set(required_columns) - set(columns)}")
-                return
-
-            # لود تنظیمات
             cursor.execute("SELECT * FROM settings WHERE id = 1")
-            result = cursor.fetchone()
-            if result:
-                device = result[1] if result[1] and result[1] in [self.device_combo.itemText(i) for i in range(self.device_combo.count())] else "All Devices"
-                element = result[2] if result[2] and result[2] in [self.element_combo.itemText(i) for i in range(self.element_combo.count())] else "All Elements"
-                crm_id = result[3] if result[3] and result[3] in [self.crm_combo.itemText(i) for i in range(self.crm_combo.count())] else "All CRM IDs"
-                from_date = result[4] if result[4] and validate_jalali_date(result[4]) else ""
-                to_date = result[5] if result[5] and validate_jalali_date(result[5]) else ""
-                percentage = result[6] if result[6] and validate_percentage(result[6]) else "10"
-                best_wl_checked = bool(result[7])
-                apply_blank_checked = bool(result[8])
+            row = cursor.fetchone()
+            conn.close()
 
-                self.device_combo.setCurrentText(device)
-                self.element_combo.setCurrentText(element)
-                self.crm_combo.setCurrentText(crm_id)
-                self.from_date_edit.setText(from_date)
-                self.to_date_edit.setText(to_date)
-                self.percentage_edit.setText(percentage)
-                self.best_wl_check.setChecked(best_wl_checked)
-                self.apply_blank_check.setChecked(apply_blank_checked)
+            if not row:
+                logger.warning("No settings found")
+                return
 
-                logger.debug(f"Settings loaded: device={device}, element={element}, crm_id={crm_id}, "
-                            f"from_date={from_date}, to_date={to_date}, percentage={percentage}, "
-                            f"best_wl_checked={best_wl_checked}, apply_blank_checked={apply_blank_checked}")
-            else:
-                logger.warning("No settings found in database, using defaults")
+            _, device, element, crm_id, from_date, to_date, percentage, best_wl, apply_blank = row
+            self._pending_settings = {
+                'device': device,
+                'element': element,
+                'crm_id': crm_id,
+                'from_date': from_date,
+                'to_date': to_date,
+                'percentage': percentage,
+                'best_wl': int(best_wl),
+                'apply_blank': int(apply_blank)
+            }
+            logger.info(f"Settings loaded: {self._pending_settings}")
+
         except Exception as e:
             logger.error(f"Error loading settings: {str(e)}")
-        finally:
-            conn.close()
+            self._pending_settings = None
 
     def get_db_path(self, name):
         return name
@@ -1675,9 +1689,14 @@ class CRMDataVisualizer(QMainWindow):
     def on_data_loaded(self, crm_df, blank_df):
         self.crm_df = crm_df
         self.blank_df = blank_df
-        logger.info(f"Loaded {len(crm_df)} CRM records and {len(blank_df)} BLANK records after normalization")
+        logger.info(f"Loaded {len(crm_df)} CRM records and {len(blank_df)} BLANK records")
+        
         self.populate_filters()
         self.status_label.setText("Data loaded successfully")
+
+        # بعد از پر شدن ComboBoxها، تنظیمات رو بازیابی کن
+        if hasattr(self, '_loaded_settings'):
+            QTimer.singleShot(100, self.restore_filters_after_load)
 
     def on_data_error(self, error_message):
         self.crm_df = pd.DataFrame()
@@ -1686,6 +1705,16 @@ class CRMDataVisualizer(QMainWindow):
         logger.error(error_message)
         QMessageBox.critical(self, "Error", error_message)
         self.populate_filters()
+
+    def closeEvent(self, event):
+        """ذخیره تنظیمات هنگام بسته شدن پنجره."""
+        try:
+            self.save_settings()
+            logger.info("Settings saved on application close")
+        except Exception as e:
+            logger.error(f"Error saving settings on close: {str(e)}")
+        finally:
+            event.accept()
 
     def on_filter_changed(self):
         """فیلترها تغییر کردند → ذخیره فوری + آپدیت"""
@@ -1742,45 +1771,135 @@ class CRMDataVisualizer(QMainWindow):
         if normalized_name in allowed_devices:
             return normalized_name
         return None
-
-    def populate_filters(self):
-        """پر کردن اولیه ComboBoxها — بدون گزینه‌های All"""
-        if self.crm_df.empty and self.blank_df.empty:
-            logger.warning("No data available to populate filters")
+    
+    def restore_filters_after_load(self):
+        """بازیابی مقادیر فیلتر بعد از لود داده و پر شدن ComboBoxها"""
+        if not hasattr(self, '_loaded_settings'):
             return
 
         self.updating_filters = True
         try:
-            # --- Device Combo ---
+            device, element, crm_id, from_date, to_date, percentage, best_wl, apply_blank = self._loaded_settings
+
+            # Device
+            if device and self.device_combo.findText(device) != -1:
+                self.device_combo.setCurrentText(device)
+
+            # CRM
+            if crm_id and self.crm_combo.findText(crm_id) != -1:
+                self.crm_combo.setCurrentText(crm_id)
+
+            # تاریخ
+            if validate_jalali_date(from_date):
+                self.from_date_edit.setText(from_date)
+            if validate_jalali_date(to_date):
+                self.to_date_edit.setText(to_date)
+
+            # درصد
+            if validate_percentage(percentage):
+                self.percentage_edit.setText(percentage)
+
+            # چک‌باکس‌ها
+            self.best_wl_check.setChecked(bool(best_wl))
+            self.apply_blank_check.setChecked(bool(apply_blank))
+
+            # حالا element رو آپدیت کن (بعد از device و crm)
+            QTimer.singleShot(100, lambda: self.update_element_combo(element))
+
+        except Exception as e:
+            logger.error(f"Error restoring filters: {str(e)}")
+        finally:
+            self.updating_filters = False
+            # بعد از همه، فیلترها رو اعمال کن
+            QTimer.singleShot(200, self.update_filters)
+
+    def restore_element(self, target_element):
+        self.update_element_combo()  # اول آپدیت کن
+        QTimer.singleShot(50, lambda: self.set_element_safely(target_element))
+
+    def set_element_safely(self, target_element):
+        if not target_element:
+            return
+        items = [self.element_combo.itemText(i) for i in range(self.element_combo.count())]
+        if target_element in items:
+            self.element_combo.setCurrentText(target_element)
+            logger.info(f"Element restored: {target_element}")
+        else:
+            logger.warning(f"Element {target_element} not found in current filter")
+    def apply_pending_settings(self):
+        if not hasattr(self, '_pending_settings') or not self._pending_settings:
+            return
+
+        settings = self._pending_settings
+        self.updating_filters = True
+        try:
+            # 1. Device
+            if settings['device'] and self.device_combo.findText(settings['device']) != -1:
+                self.device_combo.setCurrentText(settings['device'])
+
+            # 2. CRM
+            if settings['crm_id'] and self.crm_combo.findText(settings['crm_id']) != -1:
+                self.crm_combo.setCurrentText(settings['crm_id'])
+
+            # 3. تاریخ و درصد
+            if validate_jalali_date(settings['from_date']):
+                self.from_date_edit.setText(settings['from_date'])
+            if validate_jalali_date(settings['to_date']):
+                self.to_date_edit.setText(settings['to_date'])
+            if validate_percentage(settings['percentage']):
+                self.percentage_edit.setText(settings['percentage'])
+
+            # 4. چک‌باکس‌ها
+            self.best_wl_check.setChecked(bool(settings['best_wl']))
+            self.apply_blank_check.setChecked(bool(settings['apply_blank']))
+
+            # 5. Element — بعد از device و crm
+            QTimer.singleShot(150, lambda: self.restore_element(settings['element']))
+
+        except Exception as e:
+            logger.error(f"Error applying settings: {str(e)}")
+        finally:
+            self.updating_filters = False
+            QTimer.singleShot(300, self.update_filters)  # بعد از همه، فیلتر کن
+            
+    def on_data_loaded(self, crm_df, blank_df):
+        self.crm_df = crm_df
+        self.blank_df = blank_df
+        self.populate_filters()
+        self.status_label.setText("Data loaded")
+        # apply_pending_settings در populate_filters فراخوانی میشه
+    def populate_filters(self):
+        if self.crm_df.empty and self.blank_df.empty:
+            return
+
+        self.updating_filters = True
+        try:
+            # --- Device ---
             self.device_combo.blockSignals(True)
             self.device_combo.clear()
-            self.device_combo.addItems(['mass', 'oes 4ac', 'oes fire'])  # حذف "All Devices"
+            self.device_combo.addItems(['mass', 'oes 4ac', 'oes fire'])
             self.device_combo.blockSignals(False)
 
-            # --- CRM Combo ---
+            # --- CRM ---
             self.crm_combo.blockSignals(True)
             self.crm_combo.clear()
             crms = sorted(self.crm_df['norm_crm_id'].dropna().unique())
-            self.crm_combo.addItems(crms)  # حذف "All CRM IDs"
+            self.crm_combo.addItems(crms)
             self.crm_combo.blockSignals(False)
 
-            # --- Element Combo — فقط عناصر موجود ---
+            # --- Element ---
             self.element_combo.blockSignals(True)
             self.element_combo.clear()
             self.element_combo.blockSignals(False)
-
-            # --- ذخیره مقدار قبلی برای بازیابی ---
-            self._prev_device = self.device_combo.currentText() if self.device_combo.count() > 0 else ""
-            self._prev_crm = self.crm_combo.currentText() if self.crm_combo.count() > 0 else ""
-            self._prev_element = ""
 
         except Exception as e:
             logger.error(f"Error in populate_filters: {str(e)}")
         finally:
             self.updating_filters = False
 
-        QTimer.singleShot(50, self.update_element_combo)
-
+        # بعد از پر شدن ComboBoxها، تنظیمات رو اعمال کن
+        QTimer.singleShot(100, self.apply_pending_settings)
+        
     def update_filters(self):
         if self.updating_filters:
             return
@@ -1865,8 +1984,8 @@ class CRMDataVisualizer(QMainWindow):
         # خودکار پلات کردن بعد از فیلتر
         self.auto_plot()
 
-    def update_element_combo(self):
-        """آپدیت عناصر بر اساس Device و CRM ID انتخاب شده — بدون All Elements"""
+    def update_element_combo(self, target_element=None):
+        """آپدیت عناصر بر اساس Device و CRM — با هدف بازیابی مقدار قبلی"""
         if self.updating_filters:
             return
 
@@ -1876,22 +1995,17 @@ class CRMDataVisualizer(QMainWindow):
             current_crm = self.crm_combo.currentText()
 
             self.element_combo.blockSignals(True)
+            previous_element = self.element_combo.currentText()
             self.element_combo.clear()
 
-            # --- فیلتر داده ---
-            if current_device and current_crm:
-                mask = (
-                    (self.crm_df['folder_name'].str.contains(current_device, case=False, na=False)) &
-                    (self.crm_df['norm_crm_id'] == current_crm)
-                )
-                filtered = self.crm_df[mask]
-            elif current_device:
-                filtered = self.crm_df[self.crm_df['folder_name'].str.contains(current_device, case=False, na=False)]
-            elif current_crm:
-                filtered = self.crm_df[self.crm_df['norm_crm_id'] == current_crm]
-            else:
-                filtered = self.crm_df
+            # فیلتر داده
+            mask = pd.Series([True] * len(self.crm_df), index=self.crm_df.index)
+            if current_device:
+                mask &= self.crm_df['folder_name'].str.contains(current_device, case=False, na=False)
+            if current_crm:
+                mask &= (self.crm_df['norm_crm_id'] == current_crm)
 
+            filtered = self.crm_df[mask]
             if not filtered.empty:
                 elements = sorted({
                     el.split()[0] for el in filtered['element'].dropna().unique()
@@ -1899,15 +2013,13 @@ class CRMDataVisualizer(QMainWindow):
                 })
                 self.element_combo.addItems(elements)
 
-            # --- حفظ انتخاب قبلی اگر معتبر باشد ---
-            prev_element = getattr(self, '_prev_element', "")
-            valid_items = [self.element_combo.itemText(i) for i in range(self.element_combo.count())]
-            if prev_element in valid_items:
-                self.element_combo.setCurrentText(prev_element)
+            # بازیابی مقدار هدف (از تنظیمات ذخیره‌شده)
+            if target_element and target_element in elements:
+                self.element_combo.setCurrentText(target_element)
+            elif previous_element in [self.element_combo.itemText(i) for i in range(self.element_combo.count())]:
+                self.element_combo.setCurrentText(previous_element)
             elif self.element_combo.count() > 0:
                 self.element_combo.setCurrentIndex(0)
-
-            self._prev_element = self.element_combo.currentText()
 
         except Exception as e:
             logger.error(f"Error in update_element_combo: {str(e)}")
@@ -1915,7 +2027,8 @@ class CRMDataVisualizer(QMainWindow):
             self.element_combo.blockSignals(False)
             self.updating_filters = False
 
-        self.auto_plot()
+        # بعد از آپدیت عنصر، پلات کن
+        QTimer.singleShot(50, self.auto_plot)
 
 
     def update_table(self, crm_df, blank_df):
@@ -2416,7 +2529,7 @@ class CRMDataVisualizer(QMainWindow):
         if self.updating_filters:
             return
 
-        # اولین مقدار معتبر را انتخاب کن
+        # ریست فیلترها
         if self.device_combo.count() > 0:
             self.device_combo.setCurrentIndex(0)
         if self.crm_combo.count() > 0:
@@ -2427,8 +2540,9 @@ class CRMDataVisualizer(QMainWindow):
         self.best_wl_check.setChecked(True)
         self.apply_blank_check.setChecked(False)
 
-        self.save_settings()  # ذخیره بعد از ریست
-        logger.debug("Filters reset")
+        # ذخیره بعد از ریست
+        self.save_settings()
+        logger.debug("Filters reset and saved")
         self.update_filters()
 
     def apply_styles(self):
