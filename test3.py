@@ -1296,7 +1296,6 @@ class CRMDataVisualizer(QMainWindow):
         self.percentage_edit.setPlaceholderText("%")
         self.percentage_edit.setFixedWidth(80)
         self.percentage_edit.setText("10")
-        self.plot_button = PrimaryPushButton("Plot Data")
         self.controls_layout.addWidget(self.device_label)
         self.controls_layout.addWidget(self.device_combo)
         self.controls_layout.addWidget(self.element_label)
@@ -1309,7 +1308,6 @@ class CRMDataVisualizer(QMainWindow):
         self.controls_layout.addWidget(self.to_date_edit)
         self.controls_layout.addWidget(self.percentage_label)
         self.controls_layout.addWidget(self.percentage_edit)
-        self.controls_layout.addWidget(self.plot_button)
         self.controls_layout.addStretch()
         self.filter_layout.addLayout(self.controls_layout)
 
@@ -1332,7 +1330,6 @@ class CRMDataVisualizer(QMainWindow):
         self.percentage_edit.setToolTip("Enter control range percentage (e.g., 10 for ±10%)")
         self.best_wl_check.setToolTip("Select the best wavelength based on verification value")
         self.apply_blank_check.setToolTip("Subtract the best BLANK value from CRM data")
-        self.plot_button.setToolTip("Plot the filtered data")
 
         self.device_combo.addItem("All Devices")
         self.element_combo.addItem("All Elements")
@@ -1408,7 +1405,17 @@ class CRMDataVisualizer(QMainWindow):
         self.delete_button.clicked.connect(self.delete_files)
         self.edit_button.clicked.connect(self.edit_record)
         self.out_of_range_button.clicked.connect(self.show_out_of_range_dialog)
-        self.plot_button.clicked.connect(self.plot_data)
+       
+        # حذف دکمه → با تغییر element یا فیلترها خودکار پلات کن
+        self.element_combo.currentTextChanged.connect(self.auto_plot)
+        self.device_combo.currentTextChanged.connect(self.on_filter_changed)
+        self.crm_combo.currentTextChanged.connect(self.on_filter_changed)
+        self.from_date_edit.textChanged.connect(self.on_filter_changed)
+        self.to_date_edit.textChanged.connect(self.on_filter_changed)
+        self.percentage_edit.textChanged.connect(self.on_filter_changed)
+        self.best_wl_check.stateChanged.connect(self.on_filter_changed)
+        self.apply_blank_check.stateChanged.connect(self.on_filter_changed)
+
         self.save_button.clicked.connect(self.save_plot)
         self.reset_button.clicked.connect(self.reset_filters)
         # self.plot_widget.scene().sigMouseClicked.connect(self.on_mouse_clicked)  # Removed
@@ -1420,6 +1427,16 @@ class CRMDataVisualizer(QMainWindow):
         logger.debug("Initializing CRMDataVisualizer")
         self.load_data_thread()
 
+    def auto_plot(self):
+        """خودکار پلات کردن با تغییر element و تنظیم خودکار محورها"""
+        if self.updating_filters:
+            return
+        self.plot_data()
+        # خودکار تنظیم محورها (X و Y)
+        self.plot_widget.enableAutoRange()
+        # یا می‌توانید فقط محورها را ریست کنید
+        # self.plot_widget.getViewBox().autoRange()
+        
     def create_settings_table(self):
         """ایجاد جدول تنظیمات در دیتابیس اگر وجود نداشته باشد."""
         try:
