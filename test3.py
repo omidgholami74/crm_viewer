@@ -1977,12 +1977,14 @@ class CRMDataVisualizer(QMainWindow):
     def on_filtered_data(self, filtered_crm_df, filtered_blank_df):
         self.filtered_crm_df_cache = filtered_crm_df
         self.filtered_blank_df_cache = filtered_blank_df
-        QApplication.processEvents()
-        self.status_label.setText(f"Loaded {len(filtered_crm_df)} CRM records, {len(filtered_blank_df)} BLANK records")
-        logger.info(f"Filtered {len(filtered_crm_df)} CRM records and {len(filtered_blank_df)} BLANK records")
+        
+        self.status_label.setText(f"Filtered: {len(filtered_crm_df)} CRM, {len(filtered_blank_df)} BLANK records")
+        logger.info(f"فیلتر اعمال شد: {len(filtered_crm_df)} CRM")
 
-        # خودکار پلات کردن بعد از فیلتر
-        self.auto_plot()
+        # پلات و جدول هر دو از داده‌های فیلتر شده استفاده کنند
+        self.auto_plot()  # این plot_df_cache را پر می‌کند
+        self.update_table(filtered_crm_df, filtered_blank_df)  # این جدول را هم پر می‌کند
+        
 
     def update_element_combo(self, target_element=None):
         """آپدیت عناصر بر اساس Device و CRM — با هدف بازیابی مقدار قبلی"""
@@ -2031,48 +2033,58 @@ class CRMDataVisualizer(QMainWindow):
         QTimer.singleShot(50, self.auto_plot)
 
 
-    def update_table(self, crm_df, blank_df):
+    def update_table(self, filtered_crm_df=None, filtered_blank_df=None):
         self.table_widget.blockSignals(True)
-        combined_df = self.plot_df_cache if self.plot_df_cache is not None else pd.DataFrame()
-        if combined_df.empty:
-            logger.debug("No plotted data to display in table")
+        
+        # استفاده از داده‌های فیلتر شده (نه فقط پلات شده)
+        crm_df = filtered_crm_df if filtered_crm_df is not None else self.filtered_crm_df_cache
+        blank_df = filtered_blank_df if filtered_blank_df is not None else self.filtered_blank_df_cache
+
+        if crm_df is None or crm_df.empty:
             self.table_widget.setRowCount(0)
             self.table_widget.blockSignals(False)
             return
 
-        for col in ['id', 'crm_id', 'solution_label', 'element', 'value', 'blank_value', 'file_name', 'date']:
-            if col not in combined_df.columns:
-                combined_df[col] = pd.NA
-        combined_df = combined_df.sort_values(['date', 'crm_id', 'element'])
+        # ادغام با BLANK اگر لازم باشد
+        combined_df = crm_df.copy()
+        if self.apply_blank_check.isChecked():
+            combined_df['blank_value'] = pd.NA
+            for i, row in combined_df.iterrows():
+                blank_value, _ = self.select_best_blank(row, blank_df, None)  # ver_value لازم نیست
+                combined_df.at[i, 'blank_value'] = blank_value
 
+        # مرتب‌سازی
+        combined_df = combined_df.sort_values(['date', 'norm_crm_id', 'element'])
+
+        # محاسبه نزدیکی به مقدار مرجع (اگر ممکن)
         current_element = self.element_combo.currentText()
         current_crm = self.crm_combo.currentText()
-        ver_value = None
+        combined_df['ref_proximity'] = pd.NA
+
         if current_element != "All Elements" and current_crm != "All CRM IDs":
             ver_value = self.get_verification_value(current_crm, current_element)
+            if ver_value is not None:
+                target_col = 'value'
+                if self.apply_blank_check.isChecked():
+                    # اگر blank اعمال شده، از value (که corrected است) استفاده کن
+                    pass  # قبلاً در plot_data اعمال شده
+                combined_df['ref_proximity'] = abs(combined_df[target_col] - ver_value) / ver_value * 100
 
-        combined_df['ref_proximity'] = pd.NA
-        if ver_value is not None:
-            if self.apply_blank_check.isChecked():
-                combined_df['ref_proximity'] = abs(combined_df['value'] - ver_value) / ver_value * 100 if 'value' in combined_df else pd.NA
-            else:
-                combined_df['ref_proximity'] = abs(combined_df['value'] - ver_value) / ver_value * 100 if 'value' in combined_df else pd.NA
-
+        # پر کردن جدول
         self.table_widget.setRowCount(len(combined_df))
         for i, row in combined_df.iterrows():
-            QApplication.processEvents()
-            self.table_widget.setItem(i, 0, QTableWidgetItem(str(row['id']) if pd.notna(row['id']) else ""))
+            self.table_widget.setItem(i, 0, QTableWidgetItem(str(row.get('id', ''))))
             self.table_widget.setItem(i, 1, QTableWidgetItem(str(row['crm_id'])))
             self.table_widget.setItem(i, 2, QTableWidgetItem(str(row['solution_label'])))
             self.table_widget.setItem(i, 3, QTableWidgetItem(str(row['element'])))
-            self.table_widget.setItem(i, 4, QTableWidgetItem(f"{row['value']:.2f}" if pd.notna(row['value']) else ""))
-            self.table_widget.setItem(i, 5, QTableWidgetItem(f"{row['blank_value']:.2f}" if pd.notna(row['blank_value']) else ""))
+            self.table_widget.setItem(i, 4, QTableWidgetItem(f"{row['value']:.6f}" if pd.notna(row['value']) else ""))
+            self.table_widget.setItem(i, 5, QTableWidgetItem(f"{row.get('blank_value', ''):.6f}" if pd.notna(row.get('blank_value')) else ""))
             self.table_widget.setItem(i, 6, QTableWidgetItem(str(row['file_name'])))
             self.table_widget.setItem(i, 7, QTableWidgetItem(str(row['date']) if pd.notna(row['date']) else ""))
             self.table_widget.setItem(i, 8, QTableWidgetItem(f"{row['ref_proximity']:.2f}%" if pd.notna(row['ref_proximity']) else ""))
-        
-        self.status_label.setText(f"Loaded {len(combined_df)} plotted CRM records")
-        logger.info(f"Updated table with {len(combined_df)} plotted records")
+
+        self.status_label.setText(f"Table: {len(combined_df)} records")
+        logger.info(f"جدول با {len(combined_df)} رکورد به‌روزرسانی شد")
         self.table_widget.blockSignals(False)
 
     def export_table(self):
@@ -2310,6 +2322,7 @@ class CRMDataVisualizer(QMainWindow):
             plot_df = pd.concat([plot_df, crm_df], ignore_index=True)
         
         self.plot_df_cache = plot_df
+        self.update_table(self.filtered_crm_df_cache, self.filtered_blank_df_cache)
         if plotted_records == 0:
             self.status_label.setText("No data to plot")
             logger.info("No data plotted")
