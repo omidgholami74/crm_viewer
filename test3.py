@@ -1387,7 +1387,7 @@ class CRMDataVisualizer(QMainWindow):
 
         self.table_widget = QTableWidget()
         self.table_widget.setColumnCount(9)
-        self.table_widget.setHorizontalHeaderLabels(["ID", "CRM ID", "Solution Label", "Element", "Value", "Blank Value", "File Name", "Date", "Proximity %"])
+        self.table_widget.setHorizontalHeaderLabels(["ID", "CRM ID", "Solution Label", "Element", "Value", "Blank Value", "File Name", "Date", "Ref Proximity %"])
         self.table_widget.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table_widget.setSelectionMode(QTableWidget.SingleSelection)
         self.table_widget.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -2061,20 +2061,14 @@ class CRMDataVisualizer(QMainWindow):
         current_crm = self.crm_combo.currentText()
         combined_df['ref_proximity'] = pd.NA
 
-        ver_value = self.get_verification_value(current_crm, current_element)
-        if ver_value is not None:
-            target_col = 'value'
-            if self.apply_blank_check.isChecked():
-                # اگر blank اعمال شده، از value (که corrected است) استفاده کن
-                pass  # قبلاً در plot_data اعمال شده
-            
-            # محاسبه نسبت به درصد
-            combined_df['ref_proximity'] = (abs(combined_df[target_col]) / ver_value) * 100
-            
-            # اعمال شرط: اگر کمتر از 100 بود، منفی کن
-            combined_df['ref_proximity'] = combined_df['ref_proximity'].apply(
-                lambda x: -(100 - x) if x < 100 else x
-            )
+        if current_element != "All Elements" and current_crm != "All CRM IDs":
+            ver_value = self.get_verification_value(current_crm, current_element)
+            if ver_value is not None:
+                target_col = 'value'
+                if self.apply_blank_check.isChecked():
+                    # اگر blank اعمال شده، از value (که corrected است) استفاده کن
+                    pass  # قبلاً در plot_data اعمال شده
+                combined_df['ref_proximity'] = (ver_value - combined_df[target_col] ) / ver_value * 100
 
         # پر کردن جدول
         self.table_widget.setRowCount(len(combined_df))
