@@ -6,7 +6,7 @@ import logging
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QHeaderView, QProgressBar, QMessageBox,
-    QFileDialog, QLabel, QDialog, QComboBox, QPushButton, QListWidget, QListWidgetItem, QLineEdit,
+    QFileDialog, QLabel, QDialog, QComboBox, QPushButton, QListWidget, QListWidgetItem, QLineEdit,QTextEdit
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal,QTimer
 from PyQt5.QtGui import QFont, QPixmap, QColor
@@ -27,6 +27,7 @@ from PIL import Image
 import csv
 import shutil
 import os
+import openai
 
 # Setup logging with UTF-8 encoding
 log_file = Path("crm_visualizer.log").resolve()
@@ -132,7 +133,7 @@ def load_raw_file(file_path, db_path, selected_device=None):
     """Load and parse raw CSV/.rep file into a DataFrame with required columns."""
     file_path = Path(file_path)
     logger.info(f"Processing raw file: {file_path} with device: {selected_device}")
-    allowed_crms = ['258', '252', '906', '506', '233', '255', '263', '260']
+    allowed_crms = ['258', '252', '906', '506', '233', '255', '263', '260','932','908']
     crm_pattern = re.compile(r'^(?:\s*CRM\s*)?(\d{3}(?:\s*[a-zA-Z])?)$', re.IGNORECASE)
     blank_pattern = re.compile(r'(?:CRM\s*)?(?:BLANK|BLNK)(?:S|s)?(?:\s+.*)?', re.IGNORECASE)
 
@@ -488,41 +489,41 @@ class DeleteFilesDialog(QDialog):
             total += self.record_counts.get(file_name, 0)
         return total
     
-def delete_files(self):
-    """Updated delete_files method with async loading"""
-    all_df = pd.concat([self.crm_df, self.blank_df])
-    file_names = all_df['file_name'].unique().tolist()  # Convert to list explicitly
-    
-    if not file_names:  # Fix: Check if list is empty
-        QMessageBox.warning(self, "Warning", "No files to delete")
-        return
-    
-    # Show dialog with async loading
-    dialog = DeleteFilesDialog(self, file_names, self.crm_db_path)
-    
-    # Connect dialog signals to handle completion
-    if dialog.exec_() == QDialog.Accepted:
-        selected_files = dialog.get_selected_files()
-        if not selected_files:
-            QMessageBox.warning(self, "Warning", "No files selected for deletion")
+    def delete_files(self):
+        """Updated delete_files method with async loading"""
+        all_df = pd.concat([self.crm_df, self.blank_df])
+        file_names = all_df['file_name'].unique().tolist()  # Convert to list explicitly
+        
+        if not file_names:  # Fix: Check if list is empty
+            QMessageBox.warning(self, "Warning", "No files to delete")
             return
         
-        total_records = dialog.get_total_records()
-        confirm = QMessageBox.question(
-            self, "Confirm Delete",
-            f"Are you sure you want to delete {len(selected_files)} files with {total_records:,} records?\n\n"
-            f"Selected files:\n{chr(10).join(selected_files[:5])}{'...' if len(selected_files) > 5 else ''}",
-            QMessageBox.Yes | QMessageBox.No
-        )
+        # Show dialog with async loading
+        dialog = DeleteFilesDialog(self, file_names, self.crm_db_path)
         
-        if confirm == QMessageBox.Yes:
-            self.progress_bar.setVisible(True)
-            self.delete_thread = DeleteFilesThread(self.crm_db_path, selected_files)
-            self.delete_thread.delete_completed.connect(self.on_delete_completed)
-            self.delete_thread.error_occurred.connect(self.on_data_error)
-            self.delete_thread.progress_updated.connect(self.progress_bar.setValue)
-            self.delete_thread.finished.connect(lambda: self.progress_bar.setVisible(False))
-            self.delete_thread.start()
+        # Connect dialog signals to handle completion
+        if dialog.exec_() == QDialog.Accepted:
+            selected_files = dialog.get_selected_files()
+            if not selected_files:
+                QMessageBox.warning(self, "Warning", "No files selected for deletion")
+                return
+            
+            total_records = dialog.get_total_records()
+            confirm = QMessageBox.question(
+                self, "Confirm Delete",
+                f"Are you sure you want to delete {len(selected_files)} files with {total_records:,} records?\n\n"
+                f"Selected files:\n{chr(10).join(selected_files[:5])}{'...' if len(selected_files) > 5 else ''}",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            
+            if confirm == QMessageBox.Yes:
+                self.progress_bar.setVisible(True)
+                self.delete_thread = DeleteFilesThread(self.crm_db_path, selected_files)
+                self.delete_thread.delete_completed.connect(self.on_delete_completed)
+                self.delete_thread.error_occurred.connect(self.on_data_error)
+                self.delete_thread.progress_updated.connect(self.progress_bar.setValue)
+                self.delete_thread.finished.connect(lambda: self.progress_bar.setVisible(False))
+                self.delete_thread.start()
 class EditRecordDialog(QDialog):
     def __init__(self, parent=None, record=None, db_path=None):
         super().__init__(parent)
@@ -613,7 +614,7 @@ class DataLoaderThread(QThread):
             crm_df = df[df['crm_id'] != 'BLANK'].copy()
             blank_df = df[df['crm_id'] == 'BLANK'].copy()
             crm_df['norm_crm_id'] = crm_df['crm_id'].apply(normalize_crm_id)
-            allowed_crms = ['258', '252', '906', '506', '233', '255', '263', '260']
+            allowed_crms = ['258', '252', '906', '506', '233', '255', '263', '260','932','908']
             crm_df = crm_df[crm_df['norm_crm_id'].isin(allowed_crms)].dropna(subset=['norm_crm_id'])
             logger.debug(f"Sample CRM dates: {crm_df['date'].head(10).to_list()}")
             logger.debug(f"Sample BLANK dates: {blank_df['date'].head(10).to_list()}")
@@ -1074,7 +1075,7 @@ class OutOfRangeThread(QThread):
     def is_valid_crm_id(self, crm_id):
         """Check if CRM ID is valid."""
         norm = self.normalize_crm_id(crm_id)
-        allowed_crms = ['258', '252', '906', '506', '233', '255', '263', '260']
+        allowed_crms = ['258', '252', '906', '506', '233', '255', '263', '260','932','908']
         return norm in allowed_crms
 
     def get_verification_value(self, crm_id, element):
@@ -1241,6 +1242,8 @@ class CRMDataVisualizer(QMainWindow):
         self.edit_button = PrimaryPushButton("Edit Record", self, FluentIcon.EDIT)
         self.out_of_range_button = PrimaryPushButton("Out of Range", self, FluentIcon.SEARCH)
         self.save_button = PrimaryPushButton("Save Plot", self, FluentIcon.SAVE)
+        self.ai_analyze_button = PrimaryPushButton("تحلیل با هوش مصنوعی", self)
+        self.ai_analyze_button.clicked.connect(self.analyze_with_ai_text)  # تابع جدید
         self.reset_button = PrimaryPushButton("Reset Filters", self, FluentIcon.SYNC)
         self.button_layout.addWidget(self.import_button)
         self.button_layout.addWidget(self.export_button)
@@ -1248,6 +1251,7 @@ class CRMDataVisualizer(QMainWindow):
         self.button_layout.addWidget(self.edit_button)
         self.button_layout.addWidget(self.out_of_range_button)
         self.button_layout.addWidget(self.save_button)
+        self.button_layout.addWidget(self.ai_analyze_button)
         self.button_layout.addWidget(self.reset_button)
         self.button_layout.addStretch()
         self.button_card.setLayout(self.button_layout)
@@ -1760,7 +1764,7 @@ class CRMDataVisualizer(QMainWindow):
 
     def is_valid_crm_id(self, crm_id):
         norm = normalize_crm_id(crm_id)
-        allowed_crms = ['258', '252', '906', '506', '233', '255', '263', '260']
+        allowed_crms = ['258', '252', '906', '506', '233', '255', '263', '260','932','908']
         return norm in allowed_crms
 
     def extract_device_name(self, folder_name):
@@ -2342,6 +2346,155 @@ class CRMDataVisualizer(QMainWindow):
         percentage = float(self.percentage_edit.text()) if validate_percentage(self.percentage_edit.text()) else 10.0
         dialog = OutOfRangeFilesDialog(self, file_names, self.crm_db_path, percentage, self.ver_db_path)
         dialog.exec_()
+
+    def analyze_with_ai_text(self):
+        """تحلیل عنصر با ارسال داده‌های جدولی به ChatGPT (بدون عکس)"""
+        if self.plot_df_cache is None or self.plot_df_cache.empty:
+            QMessageBox.warning(self, "هشدار", "ابتدا یک عنصر را انتخاب و نمودار را رسم کنید.")
+            return
+
+        current_element = self.element_combo.currentText()
+        current_crm = self.crm_combo.currentText() if self.crm_combo.currentText() != "All CRM IDs" else None
+        apply_blank = self.apply_blank_check.isChecked()
+
+        if current_element == "All Elements":
+            QMessageBox.warning(self, "هشدار", "لطفاً یک عنصر خاص انتخاب کنید.")
+            return
+
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(10)
+        self.status_label.setText("در حال آماده‌سازی داده‌ها برای هوش مصنوعی...")
+
+        try:
+            # 1. داده‌های عنصر فعلی (در CRM انتخاب شده)
+            df_main = self.plot_df_cache.copy()
+            df_main = df_main[['date', 'crm_id', 'element', 'value', 'blank_value', 'original_value']].copy()
+            if 'original_value' not in df_main.columns:
+                df_main['original_value'] = df_main['value']
+            df_main['value_corrected'] = df_main['value']
+            if apply_blank:
+                df_main['value_corrected'] = df_main['value']
+
+            # مرتب‌سازی و نمایش تمیز
+            df_main = df_main.sort_values('date')
+            csv_main = df_main.to_csv(index=False, encoding='utf-8')
+
+            # 2. همان عنصر در CRMهای دیگر
+            other_crms_df = self.filtered_crm_df_cache[
+                (self.filtered_crm_df_cache['element'].str.startswith(current_element + ' ') |
+                (self.filtered_crm_df_cache['element'] == current_element))
+            ]
+            if current_crm:
+                other_crms_df = other_crms_df[other_crms_df['norm_crm_id'] != current_crm]
+
+            if not other_crms_df.empty and apply_blank:
+                # اعمال blank correction برای مقایسه منصفانه
+                other_crms_df = other_crms_df.copy()
+                for i, row in other_crms_df.iterrows():
+                    blank_val, corrected = self.select_best_blank(row, self.filtered_blank_df_cache, None)
+                    other_crms_df.at[i, 'value'] = corrected if pd.notna(corrected) else row['value']
+
+            other_crms_df = other_crms_df[['date', 'crm_id', 'element', 'value']].sort_values(['crm_id', 'date'])
+            csv_other_crms = other_crms_df.to_csv(index=False, encoding='utf-8') if not other_crms_df.empty else "داده‌ای موجود نیست."
+
+            # 3. عناصر دیگر در همان CRM و بازه زمانی
+            if current_crm:
+                same_crm_other_elements = self.filtered_crm_df_cache[
+                    (self.filtered_crm_df_cache['norm_crm_id'] == current_crm) &
+                    (~self.filtered_crm_df_cache['element'].str.startswith(current_element + ' ') &
+                    (self.filtered_crm_df_cache['element'] != current_element))
+                ]
+                same_crm_other_elements = same_crm_other_elements[['date', 'element', 'value']].sort_values(['element', 'date'])
+                csv_other_elements = same_crm_other_elements.to_csv(index=False, encoding='utf-8') if not same_crm_other_elements.empty else "داده‌ای موجود نیست."
+            else:
+                csv_other_elements = "CRM خاصی انتخاب نشده است."
+
+            self.progress_bar.setValue(60)
+
+            # پرامپت حرفه‌ای و دقیق (به فارسی یا انگلیسی؟ اینجا فارسی نوشتم، ولی بهتره انگلیسی باشه برای دقت بیشتر)
+            prompt = f"""
+    You are an expert analytical chemist specializing in ICP/OES and ICP/MS data quality control.
+
+    We are monitoring CRM (Certified Reference Material) performance over time for the element **{current_element}**.
+
+    ### Current Settings:
+    - Selected CRM: {current_crm or "Multiple"}
+    - Blank correction applied: {"Yes" if apply_blank else "No"}
+    - Best wavelength selection: {"Yes" if self.best_wl_check.isChecked() else "No"}
+
+    ### Table 1: Current Element ({current_element}) in Selected CRM
+    {csv_main}
+
+    ### Table 2: Same Element ({current_element}) in Other CRMs
+    {csv_other_crms}
+
+    ### Table 3: Other Elements in the Same CRM ({current_crm or "Selected CRM"})
+    {csv_other_elements}
+
+    Please provide a detailed analysis including:
+    1. Trend analysis (drift, stability, sudden changes)
+    2. Comparison with reference value (if known)
+    3. Blank correction effectiveness
+    4. Any anomalies or outliers
+    5. Recommendations for instrument maintenance, recalibration, or method adjustment
+    6. Overall data quality assessment
+
+    Answer in Persian (فارسی) and be technical but clear.
+    """
+
+            self.progress_bar.setValue(80)
+
+            # ارسال به ChatGPT
+            client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY", "your-key-here"))
+
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",  # یا gpt-4o برای دقت بیشتر
+                messages=[
+                    {"role": "system", "content": "You are a professionaql QC chemist analyzing CRM control charts."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=1500,
+                temperature=0.5
+            )
+
+            analysis = response.choices[0].message.content
+
+            self.progress_bar.setValue(100)
+
+            # نمایش نتیجه در پنجره زیبا
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f"تحلیل هوش مصنوعی - {current_element}")
+            dialog.setMinimumSize(900, 700)
+            layout = QVBoxLayout()
+
+            text_edit = QTextEdit()
+            text_edit.setReadOnly(True)
+            text_edit.setFont(QFont("Tahoma", 11))
+            text_edit.setText(analysis)
+
+            copy_button = QPushButton("کپی متن")
+            copy_button.clicked.connect(lambda: QApplication.clipboard().setText(analysis))
+
+            close_button = QPushButton("بستن")
+            close_button.clicked.connect(dialog.accept)
+
+            btn_layout = QHBoxLayout()
+            btn_layout.addWidget(copy_button)
+            btn_layout.addWidget(close_button)
+
+            layout.addWidget(QLabel(f"<h3>تحلیل هوش مصنوعی برای عنصر: <b>{current_element}</b></h3>"))
+            layout.addWidget(text_edit)
+            layout.addLayout(btn_layout)
+            dialog.setLayout(layout)
+            dialog.exec_()
+
+            self.status_label.setText("تحلیل هوش مصنوعی با موفقیت انجام شد.")
+
+        except Exception as e:
+            logger.error(f"AI Analysis (text) failed: {str(e)}")
+            QMessageBox.critical(self, "خطا", f"خطا در ارتباط با هوش مصنوعی:\n{str(e)}")
+        finally:
+            self.progress_bar.setVisible(False)
 
     def edit_record(self):
         selected = self.table_widget.currentRow()
