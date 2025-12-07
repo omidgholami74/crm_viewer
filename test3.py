@@ -2369,7 +2369,7 @@ class CRMDataVisualizer(QMainWindow):
         try:
             # 1. داده‌های عنصر فعلی (در CRM انتخاب شده)
             df_main = self.plot_df_cache.copy()
-            df_main = df_main[['date', 'crm_id', 'element', 'value', 'blank_value', 'original_value']].copy()
+            # df_main = df_main[["ID", "CRM ID", "Solution Label", "Element", "Value","Refrence", "Blank Value", "File Name", "Date","Ref Proximity %"]].copy()
             if 'original_value' not in df_main.columns:
                 df_main['original_value'] = df_main['value']
             df_main['value_corrected'] = df_main['value']
