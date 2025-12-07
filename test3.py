@@ -2413,39 +2413,72 @@ class CRMDataVisualizer(QMainWindow):
 
             # پرامپت حرفه‌ای و دقیق (به فارسی یا انگلیسی؟ اینجا فارسی نوشتم، ولی بهتره انگلیسی باشه برای دقت بیشتر)
             prompt = f"""
-    You are an expert analytical chemist specializing in ICP/OES and ICP/MS data quality control.
+                You are an expert analytical chemist with over 15 years of experience in ICP-OES, ICP-MS, and quality control for geochemical and environmental samples. You specialize in CRM (Certified Reference Material) performance monitoring, drift analysis, blank corrections, and instrument optimization. Provide a thorough, data-driven analysis based on the supplied tables, focusing on statistical trends, potential sources of error, and actionable recommendations.
+            Current Analysis Context:
 
-    We are monitoring CRM (Certified Reference Material) performance over time for the element **{current_element}**.
+            Element under Review: {current_element}
+            Primary CRM: {current_crm or "Multiple CRMs analyzed"}
+            Blank Correction Applied: {"Yes (with best blank selection based on proximity to reference)" if apply_blank else "No"}
+            Wavelength Selection: {"Best wavelength chosen per date based on minimal deviation from reference" if self.best_wl_check.isChecked() else "All wavelengths included"}
+            Date Range: From {self.from_date_edit.text() or "Earliest available"} to {self.to_date_edit.text() or "Latest available"}
+            Control Limits: ±{self.percentage_edit.text() or "10"}% around reference value (if available)
+            Additional Notes: Where reference values (ref_value) are available, they are included in Table 1 for direct comparison. Ref Proximity (%) is calculated as ((ref_value - measured_value) / ref_value) * 100, indicating bias. Positive values mean underestimation, negative mean overestimation.
 
-    ### Current Settings:
-    - Selected CRM: {current_crm or "Multiple"}
-    - Blank correction applied: {"Yes" if apply_blank else "No"}
-    - Best wavelength selection: {"Yes" if self.best_wl_check.isChecked() else "No"}
+            Table 1: Data for {current_element} in Primary CRM (with Corrections and Reference Proximity)
+            This table includes dates, measured values, blank corrections (if applied), corrected values, reference values (ref_value from verification database), and reference proximity (% bias).
+            {csv_main}
+            Table 2: Same Element ({current_element}) Across Other CRMs
+            Comparative data for benchmarking against alternative standards. Includes dates, CRM IDs, values (corrected if blank applied), and ref_values where available.
+            {csv_other_crms}
+            Table 3: Other Elements in the Same CRM and Date Range
+            Contextual data from co-analyzed elements to detect systemic issues (e.g., instrument drift affecting multiple analytes). Includes dates, elements, and values.
+            {csv_other_elements}
+            Perform a comprehensive analysis addressing ALL of the following aspects in detail. Use statistical metrics where possible (e.g., mean, standard deviation, CV%, linear regression for trends). Reference specific data points, dates, or patterns from the tables. Structure your response clearly with subsections.
 
-    ### Table 1: Current Element ({current_element}) in Selected CRM
-    {csv_main}
+            Trend Analysis (Drift, Stability, Sudden Changes):
+            Describe temporal trends: Is there upward/downward drift over time? Calculate slope if applicable.
+            Assess stability: Compute coefficient of variation (CV%) for the dataset. Highlight periods of high/low variability.
+            Identify sudden changes/outliers: Flag anomalies (e.g., >3σ from mean) and potential causes (e.g., sample prep error, contamination).
 
-    ### Table 2: Same Element ({current_element}) in Other CRMs
-    {csv_other_crms}
+            Comparison with Reference Value (Accuracy and Bias):
+            For each date/measurement, evaluate deviation from ref_value.
+            Calculate overall bias (mean ref_proximity %), recovery (measured/ref * 100), and trueness.
+            Discuss patterns: Consistent under/overestimation? Correlation with date or blank values?
 
-    ### Table 3: Other Elements in the Same CRM ({current_crm or "Selected CRM"})
-    {csv_other_elements}
+            Effectiveness of Blank Correction:
+            Compare original vs. corrected values: Quantify improvement (e.g., reduced bias or variance post-correction).
+            Assess blank variability: If blanks are inconsistent, recommend optimization.
+            Evaluate if correction brings values closer to ref_value (use ref_proximity before/after).
 
-    Please provide a detailed analysis including:
-    1. Trend analysis (drift, stability, sudden changes)
-    2. Comparison with reference value (if known)
-    3. Blank correction effectiveness
-    4. Any anomalies or outliers
-    5. Recommendations for instrument maintenance, recalibration, or method adjustment
-    6. Overall data quality assessment
+            Anomalies, Outliers, and Potential Error Sources:
+            Detect outliers using statistical tests (e.g., Z-score >3).
+            Cross-reference with Table 3: Are anomalies isolated to this element or systemic (e.g., affecting other elements on the same date)?
+            Possible causes: Instrument contamination, matrix effects, calibration drift, operator error, or environmental factors.
 
-    Answer in Persian (فارسی) and be technical but clear.
-    """
+            Cross-CRM and Cross-Element Comparisons:
+            Compare performance in Table 2: Is the primary CRM consistent with others? Highlight discrepancies.
+            From Table 3: Check for correlated anomalies (e.g., all elements high on a specific date, suggesting dilution error).
+
+            Overall Data Quality Assessment:
+            Rate quality (Excellent/Good/Fair/Poor) based on precision (CV<5% good), accuracy (|bias|<5% good), and completeness.
+            Statistical summary: Mean, median, SD, min/max for key metrics.
+            Compliance: Does data meet QC criteria (e.g., within control limits)?
+
+            Recommendations for Improvement:
+            Instrument: Schedule maintenance, check torch/nebulizer, verify gas purity.
+            Method: Optimize blank subtraction, use internal standards, increase replicates.
+            Calibration: Recalibrate if bias >10%; use multi-point curves.
+            Data Handling: Implement automated QC charts, set alert thresholds.
+            Further Investigations: Suggest re-analysis of outliers or additional CRMs.
+
+
+            Respond in professional Persian (فارسی رسمی و فنی), using clear language, bullet points, and bold key terms for readability. Avoid speculation; base all conclusions on data. If data is insufficient for an aspect, note it and suggest how to obtain more.
+            """
 
             self.progress_bar.setValue(80)
 
             # ارسال به ChatGPT
-            client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY", "your-key-here"))
+            client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
 
             response = client.chat.completions.create(
                 model="gpt-4o-mini",  # یا gpt-4o برای دقت بیشتر
