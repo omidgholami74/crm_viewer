@@ -29,11 +29,13 @@ import shutil
 import os
 import openai
 
+
+allowed_crms = ['258', '252', '906', '506', '233', '255', '263', '260','932','908','238','250','254']
 # Setup logging with UTF-8 encoding
-log_file = Path("crm_visualizer.log").resolve()
-file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
-file_handler.setLevel(logging.DEBUG)
-file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+# log_file = Path("crm_visualizer.log").resolve()
+# file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
+# file_handler.setLevel(logging.DEBUG)
+# file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setLevel(logging.DEBUG)
@@ -42,7 +44,7 @@ console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
 logger.handlers = []
-logger.addHandler(file_handler)
+# logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 
 def normalize_crm_id(crm_id):
@@ -133,7 +135,6 @@ def load_raw_file(file_path, db_path, selected_device=None):
     """Load and parse raw CSV/.rep file into a DataFrame with required columns."""
     file_path = Path(file_path)
     logger.info(f"Processing raw file: {file_path} with device: {selected_device}")
-    allowed_crms = ['258', '252', '906', '506', '233', '255', '263', '260','932','908']
     crm_pattern = re.compile(r'^(?:\s*CRM\s*)?(\d{3}(?:\s*[a-zA-Z])?)$', re.IGNORECASE)
     blank_pattern = re.compile(r'(?:CRM\s*)?(?:BLANK|BLNK)(?:S|s)?(?:\s+.*)?', re.IGNORECASE)
 
@@ -614,7 +615,6 @@ class DataLoaderThread(QThread):
             crm_df = df[df['crm_id'] != 'BLANK'].copy()
             blank_df = df[df['crm_id'] == 'BLANK'].copy()
             crm_df['norm_crm_id'] = crm_df['crm_id'].apply(normalize_crm_id)
-            allowed_crms = ['258', '252', '906', '506', '233', '255', '263', '260','932','908']
             crm_df = crm_df[crm_df['norm_crm_id'].isin(allowed_crms)].dropna(subset=['norm_crm_id'])
             logger.debug(f"Sample CRM dates: {crm_df['date'].head(10).to_list()}")
             logger.debug(f"Sample BLANK dates: {blank_df['date'].head(10).to_list()}")
@@ -1075,7 +1075,6 @@ class OutOfRangeThread(QThread):
     def is_valid_crm_id(self, crm_id):
         """Check if CRM ID is valid."""
         norm = self.normalize_crm_id(crm_id)
-        allowed_crms = ['258', '252', '906', '506', '233', '255', '263', '260','932','908']
         return norm in allowed_crms
 
     def get_verification_value(self, crm_id, element):
@@ -1151,7 +1150,7 @@ class OutOfRangeThread(QThread):
 
     def select_best_blank(self, crm_row, blank_df, ver_value):
         if blank_df.empty or ver_value is None:
-            logger.debug(f"No blank correction applied: empty blank_df={blank_df.empty}, ver_value={ver_value}")
+            # logger.debug(f"No blank correction applied: empty blank_df={blank_df.empty}, ver_value={ver_value}")
             return None, crm_row['value']
 
         relevant_blanks = blank_df[
@@ -1194,7 +1193,8 @@ class OutOfRangeThread(QThread):
         if best_blank_value is not None:
             logger.info(f"Selected blank value {best_blank_value:.2f} for CRM row {crm_row['id']}, corrected value={corrected_value:.2f}, diff={best_diff:.2f}")
         else:
-            logger.debug(f"No valid blank value selected for CRM row {crm_row['id']}, using original value={crm_row['value']:.2f}")
+            # logger.debug(f"No valid blank value selected for CRM row {crm_row['id']}, using original value={crm_row['value']:.2f}")
+            pass
 
         return best_blank_value, corrected_value
     
@@ -1764,7 +1764,6 @@ class CRMDataVisualizer(QMainWindow):
 
     def is_valid_crm_id(self, crm_id):
         norm = normalize_crm_id(crm_id)
-        allowed_crms = ['258', '252', '906', '506', '233', '255', '263', '260','932','908']
         return norm in allowed_crms
 
     def extract_device_name(self, folder_name):
@@ -2182,7 +2181,7 @@ class CRMDataVisualizer(QMainWindow):
 
     def select_best_blank(self, crm_row, blank_df, ver_value):
         if blank_df.empty or ver_value is None:
-            logger.debug(f"No blank correction applied: empty blank_df={blank_df.empty}, ver_value={ver_value}")
+            # logger.debug(f"No blank correction applied: empty blank_df={blank_df.empty}, ver_value={ver_value}")
             return None, crm_row['value']
         
         relevant_blanks = blank_df[
@@ -2199,7 +2198,6 @@ class CRMDataVisualizer(QMainWindow):
         blank_valid_pattern = re.compile(r'^(?:CRM\s*)?(?:BLANK|BLNK|Blank|blnk|blank)(?:\s*[a-zA-Z]{1,2})?$', re.IGNORECASE)
         
         valid_blanks = relevant_blanks[relevant_blanks['solution_label'].apply(lambda x: bool(blank_valid_pattern.match(str(x).strip())))]
-        print(relevant_blanks,'valid blank :',valid_blanks)
         if valid_blanks.empty:
             logger.debug(f"No valid blanks found for CRM row {crm_row['id']}")
             return None, crm_row['value']
@@ -2226,9 +2224,11 @@ class CRMDataVisualizer(QMainWindow):
                     continue
         
         if best_blank_value is not None:
-            logger.info(f"Selected blank value {best_blank_value} for CRM row {crm_row['id']}, corrected value={corrected_value}, diff={best_diff}")
+            # logger.info(f"Selected blank value {best_blank_value} for CRM row {crm_row['id']}, corrected value={corrected_value}, diff={best_diff}")
+            pass
         else:
-            logger.debug(f"No valid blank value selected for CRM row {crm_row['id']}, using original value={crm_row['value']}")
+            # logger.debug(f"No valid blank value selected for CRM row {crm_row['id']}, using original value={crm_row['value']}")
+            pass
         
         return best_blank_value, corrected_value
 
