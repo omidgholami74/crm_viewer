@@ -2321,7 +2321,7 @@ class CRMDataVisualizer(QMainWindow):
                 # تعیین درصد مجاز بر اساس مقدار مرجع
                 abs_ref = abs(ver_value)
                 if abs_ref < 1:
-                    allowed_percent = 30.0  # ±0.3 برای مقادیر زیر 1
+                    allowed_percent = 0.3  # ±0.3 برای مقادیر زیر 1
                 elif abs_ref < 10:
                     allowed_percent = 25.0
                 elif abs_ref < 100:
@@ -2333,8 +2333,12 @@ class CRMDataVisualizer(QMainWindow):
                 final_percent = allowed_percent * multiplier
 
                 # محاسبه LCL و UCL
-                lcl = ver_value * (1 - final_percent / 100)
-                ucl = ver_value * (1 + final_percent / 100)
+                if(abs_ref > 1):
+                    lcl = ver_value * (1 - final_percent / 100)
+                    ucl = ver_value * (1 + final_percent / 100)
+                else:
+                    lcl = ver_value -final_percent
+                    ucl = ver_value +final_percent
 
                 ver_value = self.get_verification_value(crm_id, current_element)
                 if ver_value is not None and not pd.isna(ver_value):
