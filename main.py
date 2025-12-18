@@ -2312,6 +2312,30 @@ class CRMDataVisualizer(QMainWindow):
             plotted_records += len(crm_df)
 
             if current_element != "All Elements" and self.crm_combo.currentText() != "All CRM IDs":
+                # عناصر حساس که تحمل دو برابر دارند
+                sensitive_elements = {'Cd', 'Ag', 'As', 'Pb', 'Se'}
+                base_element = current_element.split()[0] if ' ' in current_element else current_element
+                is_sensitive = base_element in sensitive_elements
+                multiplier = 2.0 if is_sensitive else 1.0
+
+                # تعیین درصد مجاز بر اساس مقدار مرجع
+                abs_ref = abs(ver_value)
+                if abs_ref < 1:
+                    allowed_percent = 30.0  # ±0.3 برای مقادیر زیر 1
+                elif abs_ref < 10:
+                    allowed_percent = 25.0
+                elif abs_ref < 100:
+                    allowed_percent = 15.0
+                else:
+                    allowed_percent = 10.0  # بالای 100
+
+                # اعمال ضریب برای عناصر حساس
+                final_percent = allowed_percent * multiplier
+
+                # محاسبه LCL و UCL
+                lcl = ver_value * (1 - final_percent / 100)
+                ucl = ver_value * (1 + final_percent / 100)
+
                 ver_value = self.get_verification_value(crm_id, current_element)
                 if ver_value is not None and not pd.isna(ver_value):
                     delta = ver_value * (percentage / 100) / 3
@@ -2322,6 +2346,10 @@ class CRMDataVisualizer(QMainWindow):
                     self.plot_widget.plot(x_range, [ver_value + delta] * 2, pen=mkPen('#45B7D1', width=1, style=Qt.DotLine), name="1LS")
                     self.plot_widget.plot(x_range, [ver_value + 2 * delta] * 2, pen=mkPen('#45B7D1', width=1, style=Qt.DotLine), name="2LS")
                     self.plot_widget.plot(x_range, [ver_value * (1 + percentage / 100)] * 2, pen=mkPen('#FF6B6B', width=2, style=Qt.DotLine), name="UCL")
+                    self.plot_widget.plot(x_range, [lcl] * 2, pen=mkPen("#3E1AE0", width=2, style=Qt.DotLine),name=f"LCL (-{final_percent:.1f}%)")
+                    self.plot_widget.plot(x_range, [ucl] * 2, pen=mkPen('#3E1AE0', width=2, style=Qt.DotLine),name=f"UCL (+{final_percent:.1f}%)")
+                    self.plot_widget.plot(x_range, [ver_value] * 2, pen=mkPen('#000000', width=3, style=Qt.SolidLine),
+                                        name=f"Ref Value ({ver_value:.6f})")
                     logger.info(f"Plotted control lines for CRM {crm_id}, Element {current_element}")
 
             plot_df = pd.concat([plot_df, crm_df], ignore_index=True)
